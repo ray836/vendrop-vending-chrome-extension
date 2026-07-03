@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VenDrop Product Importer</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>VenDrop</h1>
+      <p class="subtitle">Product Importer</p>
+    </header>
+
+    <div id="content">
+      <!-- Settings View (shown if no org ID set) -->
+      <div id="settings-view" class="view">
+        <div class="info-box">
+          <p>Welcome! Configure your catalog access to get started.</p>
+        </div>
+
+        <div class="form-group">
+          <label for="catalog-token-input">Catalog Maintainer Token:</label>
+          <input
+            type="password"
+            id="catalog-token-input"
+            placeholder="Enter your catalog maintainer token"
+            autocomplete="off"
+          >
+          <small class="field-hint">Sent as a Bearer token. Matches CATALOG_ADMIN_SECRET on the server. Products are added to the shared catalog, not a single org.</small>
+        </div>
+
+        <div class="form-group">
+          <label for="api-url-input">API URL:</label>
+          <input
+            type="text"
+            id="api-url-input"
+            placeholder="http://localhost:3000"
+            value="http://localhost:3000"
+            autocomplete="off"
+          >
+        </div>
+
+        <button id="save-settings-btn" class="btn btn-primary">Save Settings</button>
+      </div>
+
+      <!-- Main View (shown when on supported page) -->
+      <div id="main-view" class="view hidden">
+        <div id="page-info" class="info-box">
+          <span class="retailer-badge" id="retailer-badge"></span>
+          <p class="page-status" id="page-status">Detecting page...</p>
+        </div>
+
+        <div id="product-preview" class="hidden">
+          <h3>Product Preview</h3>
+          <div class="preview-content">
+            <div class="preview-image">
+              <img id="preview-img" src="" alt="Product">
+            </div>
+            <div class="preview-details">
+              <p class="preview-name" id="preview-name"></p>
+              <p class="preview-price" id="preview-price"></p>
+            </div>
+          </div>
+        </div>
+
+        <div class="button-group">
+          <button id="edit-btn" class="btn btn-secondary" disabled>Review/Edit</button>
+          <button id="add-product-btn" class="btn btn-primary" disabled>
+            <span id="btn-text">Add to Catalog</span>
+            <span id="btn-spinner" class="spinner hidden"></span>
+          </button>
+        </div>
+
+        <div id="status-message" class="hidden"></div>
+
+        <div class="settings-link">
+          <a href="#" id="show-settings-link">Settings</a>
+        </div>
+      </div>
+
+      <!-- Not Supported View -->
+      <div id="not-supported-view" class="view hidden">
+        <div class="info-box warning">
+          <p><strong>Not Supported</strong></p>
+          <p>This page is not supported. Please navigate to a Sam's Club or Costco product page.</p>
+        </div>
+
+        <div class="supported-sites">
+          <p><strong>Supported sites:</strong></p>
+          <ul>
+            <li>samsclub.com</li>
+            <li>costco.com</li>
+          </ul>
+        </div>
+
+        <div class="settings-link">
+          <a href="#" id="show-settings-link-alt">Settings</a>
+        </div>
+      </div>
+
+      <!-- Edit Product Form View -->
+      <div id="edit-form-view" class="view hidden">
+        <div id="edit-page-info" class="info-box">
+          <span class="retailer-badge" id="edit-retailer-badge"></span>
+          <p class="page-status">Review and edit product details</p>
+        </div>
+
+        <form id="product-form" class="product-form">
+          <div class="form-section">
+            <h3>Product Information</h3>
+
+            <div class="form-group">
+              <label for="edit-name">Product Name <span class="required">*</span></label>
+              <input
+                type="text"
+                id="edit-name"
+                placeholder="Enter product name"
+                required
+              >
+              <span class="field-error hidden" id="error-name">Name is required</span>
+            </div>
+
+            <div class="form-group">
+              <label for="edit-image">Image URL <span class="required">*</span></label>
+              <input
+                type="url"
+                id="edit-image"
+                placeholder="https://..."
+                required
+              >
+              <div class="image-preview hidden" id="image-preview-container">
+                <img id="edit-image-preview" src="" alt="Preview">
+              </div>
+              <span class="field-error hidden" id="error-image">Valid image URL is required</span>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <h3>Pricing & Quantity</h3>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="edit-case-cost">Case Cost <span class="required">*</span></label>
+                <input
+                  type="number"
+                  id="edit-case-cost"
+                  placeholder="0.00"
+                  step="0.01"
+                  min="0"
+                  required
+                >
+                <span class="field-error hidden" id="error-case-cost">Valid price required</span>
+              </div>
+
+              <div class="form-group">
+                <label for="edit-case-size">Case Size <span class="required">*</span></label>
+                <input
+                  type="number"
+                  id="edit-case-size"
+                  placeholder="e.g., 50"
+                  min="1"
+                  required
+                >
+                <span class="field-error hidden" id="error-case-size">Valid size required</span>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label for="edit-price-per-each">Price Per Each</label>
+              <input
+                type="number"
+                id="edit-price-per-each"
+                placeholder="0.00 (optional)"
+                step="0.01"
+                min="0"
+              >
+            </div>
+
+            <div class="form-group">
+              <label for="edit-price-multiplier">Price Multiplier</label>
+              <input
+                type="number"
+                id="edit-price-multiplier"
+                placeholder="1.5"
+                step="0.1"
+                min="1"
+                value="1.5"
+              >
+              <small class="field-hint">Markup for recommended price (e.g., 1.5 = 50% markup)</small>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <h3>Product Identifiers</h3>
+
+            <div class="form-group">
+              <label for="edit-vendor-sku">Vendor SKU <span class="required">*</span></label>
+              <input
+                type="text"
+                id="edit-vendor-sku"
+                placeholder="Item number"
+                required
+              >
+              <span class="field-error hidden" id="error-vendor-sku">Vendor SKU is required</span>
+            </div>
+
+            <div class="form-group">
+              <label for="edit-barcode">Barcode (GTIN/UPC)</label>
+              <input
+                type="text"
+                id="edit-barcode"
+                placeholder="Optional"
+              >
+            </div>
+
+            <div class="form-group">
+              <label for="edit-category">Category</label>
+              <select id="edit-category">
+                <option value="Snacks">Snacks</option>
+                <option value="Beverages">Beverages</option>
+                <option value="Candy">Candy</option>
+                <option value="Food">Food</option>
+                <option value="Health">Health</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-section">
+            <h3>Catalog Details</h3>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="edit-region">Region</label>
+                <input
+                  type="text"
+                  id="edit-region"
+                  placeholder="Leave blank = all regions"
+                >
+                <small class="field-hint">Which region sees this catalog product.</small>
+              </div>
+
+              <div class="form-group">
+                <label for="edit-shelf-life">Shelf Life (days)</label>
+                <input
+                  type="number"
+                  id="edit-shelf-life"
+                  placeholder="Optional"
+                  min="1"
+                >
+              </div>
+            </div>
+          </div>
+
+          <div id="edit-status-message" class="hidden"></div>
+
+          <div class="form-actions">
+            <button type="button" id="cancel-edit-btn" class="btn btn-secondary">Cancel</button>
+            <button type="submit" id="save-product-btn" class="btn btn-primary">
+              <span id="save-btn-text">Save to Catalog</span>
+              <span id="save-btn-spinner" class="spinner hidden"></span>
+            </button>
+          </div>
+        </form>
+
+        <div class="settings-link">
+          <a href="#" id="show-settings-link-edit">Settings</a>
+        </div>
+      </div>
+
+      <!-- Catalog price sweep (persistent across main / not-supported views) -->
+      <div id="catalog-update-panel" class="hidden">
+        <hr class="panel-divider">
+        <button id="update-catalog-btn" class="btn btn-secondary btn-block">
+          Update Catalog Prices
+        </button>
+        <p class="panel-hint">Visits every catalog item's page and refreshes changed case costs.</p>
+
+        <div id="update-progress" class="hidden">
+          <div class="progress-row">
+            <span id="update-progress-label">Starting…</span>
+            <span id="update-progress-count">0/0</span>
+          </div>
+          <div class="progress-track">
+            <div id="update-progress-bar" class="progress-fill"></div>
+          </div>
+          <p id="update-current" class="update-current"></p>
+          <button id="cancel-update-btn" class="btn btn-secondary btn-small">Cancel</button>
+        </div>
+
+        <div id="update-summary" class="hidden"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

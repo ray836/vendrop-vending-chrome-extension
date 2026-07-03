@@ -1,0 +1,294 @@
+# VenDrop Chrome Extension
+
+Quick-add products from Sam's Club and Costco to your VenDrop vending management catalog with a single click.
+
+## Features
+
+- **One-Click Import:** Add products while browsing Sam's Club or Costco
+- **Live Preview:** See product details before adding to your catalog
+- **Automatic Extraction:** Automatically detects and extracts product information
+- **Smart Pricing:** Calculates recommended vending prices with configurable markup
+- **Multi-Retailer Support:** Works with both Sam's Club and Costco product pages
+
+## Prerequisites
+
+Before installing the extension, ensure you have:
+
+1. **VenDrop Next.js App** running locally
+   - Location: `/Users/raygrant/Documents/simple-vendrop/simple-vending-app`
+   - Running on: `http://localhost:3000`
+   - Start with: `npm run dev`
+
+2. **Catalog Maintainer Token**
+   - A shared secret that must equal `CATALOG_ADMIN_SECRET` in the app's environment
+   - Grants write access to the **shared, app-wide product catalog** (not a single org)
+
+3. **Chrome Browser** (or Chromium-based browser)
+
+## Installation
+
+### Step 1: Load the Extension
+
+1. Open Chrome and navigate to `chrome://extensions/`
+2. Enable **Developer mode** (toggle switch in top right corner)
+3. Click **"Load unpacked"** button
+4. Navigate to and select the extension directory:
+   ```
+   /Users/raygrant/Documents/simple-vendrop/vending-chrome-extention
+   ```
+5. The extension should now appear in your extensions list
+
+### Step 2: Configure Settings
+
+1. Click the VenDrop extension icon in your Chrome toolbar
+2. On first launch, you'll see the settings screen
+3. Enter your **Catalog Maintainer Token** (must equal `CATALOG_ADMIN_SECRET` on the server)
+4. Confirm the **API URL** (default: `http://localhost:3000`)
+5. Click **"Save Settings"**
+
+> Products you import go into the **shared catalog** that all owners can pick from — they are not tied to any single organization.
+
+## Usage
+
+### Adding a Product
+
+1. **Start your VenDrop API server:**
+   ```bash
+   cd /Users/raygrant/Documents/simple-vendrop/simple-vending-app
+   npm run dev
+   ```
+
+2. **Navigate to a product page:**
+   - Sam's Club: https://www.samsclub.com
+   - Costco: https://www.costco.com
+
+3. **Open a product page you want to add**
+   - Example: https://www.samsclub.com/p/lays-potato-chips/13626865899
+
+4. **Click the VenDrop extension icon**
+   - A popup will show product preview (name, image, price)
+
+5. **Click "Add to Catalog"**
+   - Extension sends the URL to your VenDrop API
+   - API scrapes full product details
+   - Product is saved to your database
+   - Success message appears
+
+6. **Verify in your VenDrop app**
+   - Navigate to your products page
+   - New product should appear in catalog
+
+## Supported Retailers
+
+### Sam's Club
+- ✅ Product pages: `samsclub.com/p/...`
+- ✅ Product pages: `samsclub.com/ip/...`
+- Extracts: name, image, price, case size, SKU, barcode
+
+### Costco
+- ✅ Product pages: `costco.com/...product...`
+- Extracts: name, image, price, case size, SKU
+
+## Troubleshooting
+
+### Extension shows "Not Supported"
+
+**Problem:** Popup displays "This page is not supported"
+
+**Solutions:**
+- Verify you're on a Sam's Club or Costco product page
+- Refresh the page if you just navigated to it
+- Check that the URL includes `samsclub.com` or `costco.com`
+
+### Product preview not loading
+
+**Problem:** Preview section doesn't show product info
+
+**Solutions:**
+- Wait for the page to fully load
+- Open browser console (F12) and check for content script errors
+- Some products may have different page structures - the scraper will still work when clicking "Add to Catalog"
+
+### "Add to Catalog" button fails
+
+**Problem:** Error message appears after clicking button
+
+**Solutions:**
+
+1. **Check API is running:**
+   ```bash
+   cd simple-vending-app
+   npm run dev
+   # Should show: Ready on http://localhost:3000
+   ```
+
+2. **Verify Catalog Maintainer Token:**
+   - Click "Settings" in extension popup
+   - Confirm the token matches `CATALOG_ADMIN_SECRET` in the app's env
+   - A 401 error means the token is missing or wrong
+
+3. **Check for CORS errors:**
+   - Open extension popup inspector (right-click icon → Inspect)
+   - Look for CORS errors in console
+   - If present, add CORS headers to API (see below)
+
+4. **Review API logs:**
+   - Check your Next.js terminal
+   - Look for error messages from the scraper
+   - Check `simple-vending-app/public/debug/screenshots/` for failed scrape screenshots
+
+### CORS
+
+CORS is already handled by the catalog route (`simple-vending-app/src/app/api/catalog/route.ts`) — it responds to `OPTIONS` and returns `Access-Control-Allow-*` headers (including `Authorization`). No changes needed for local development.
+
+## Configuration
+
+### Changing API URL
+
+If your VenDrop app runs on a different port:
+
+1. Click extension icon
+2. Click "Settings" link at bottom
+3. Update "API URL" field
+4. Click "Save Settings"
+
+### Changing Maintainer Token
+
+1. Click extension icon
+2. Click "Settings" link
+3. Update "Catalog Maintainer Token" field
+4. Click "Save Settings"
+
+## Development
+
+### File Structure
+
+```
+vending-chrome-extention/
+├── manifest.json           # Extension configuration (Manifest V3)
+├── popup.html             # Extension popup UI
+├── popup.css              # Popup styles
+├── popup.js               # Popup logic and API calls
+├── content.js             # Product extraction from web pages
+├── background.js          # Background service worker
+├── icons/                 # Extension icons (placeholder)
+│   ├── icon16.png
+│   ├── icon48.png
+│   └── icon128.png
+├── README.md             # This file
+└── CLAUDE.md             # Developer documentation
+```
+
+### Debugging
+
+**Popup Console:**
+- Right-click extension icon → "Inspect popup"
+- View popup.js logs and API responses
+
+**Content Script Console:**
+- Open DevTools on product page (F12)
+- Look for `[VenDrop]` prefixed logs
+
+**Background Script Console:**
+- Visit `chrome://extensions/`
+- Click "Service worker" link under VenDrop
+- View background.js logs
+
+### Making Changes
+
+After modifying extension files:
+
+1. Go to `chrome://extensions/`
+2. Click refresh icon (↻) under VenDrop extension
+3. Reload any open product pages
+4. Test your changes
+
+## Known Issues
+
+1. **Placeholder Icons:** Currently using basic purple squares
+   - Replace with branded icons for production
+   - See `icons/ICONS_README.md` for instructions
+
+2. **No Offline Support:** Extension requires internet connection
+   - Failed requests are not queued
+
+3. **No Duplicate Detection:** Extension doesn't check if product already exists
+   - May create duplicate entries if clicked multiple times
+
+4. **Limited Error Recovery:** No automatic retry on failure
+   - Must manually retry if scraping fails
+
+## Roadmap
+
+### Coming Soon
+- [ ] Branded extension icons
+- [ ] Category selection in popup
+- [ ] Price multiplier configuration
+- [ ] Product duplicate detection
+- [ ] Edit product before saving
+
+### Future Features
+- [ ] Support for additional retailers
+- [ ] Bulk import mode
+- [ ] Offline queue
+- [ ] Price history tracking
+- [ ] Token-based authentication
+- [ ] Browser action badge for import count
+
+## API Documentation
+
+For detailed API documentation, see:
+- `simple-vending-app/API_DOCS.md`
+
+For developer context, see:
+- `CLAUDE.md` in this directory
+
+## Support
+
+### Common Questions
+
+**Q: Can I use this extension on multiple computers?**
+A: Yes, but you'll need to load the unpacked extension on each computer and configure it with your catalog maintainer token.
+
+**Q: Does this work in production?**
+A: Currently designed for local development. For production, update the API URL to your production server and publish the extension to Chrome Web Store.
+
+**Q: Can I add products from other retailers?**
+A: Not yet. Currently supports Sam's Club and Costco only. Use "Manual Entry" in the VenDrop app for other retailers.
+
+**Q: Will this slow down my browsing?**
+A: No. The content script is lightweight and only runs on Sam's Club and Costco pages.
+
+### Getting Help
+
+If you encounter issues:
+
+1. Check this README's Troubleshooting section
+2. Review browser console for errors
+3. Check Next.js terminal for API logs
+4. Review `CLAUDE.md` for technical details
+
+## License
+
+Proprietary - VenDrop Internal Tool
+
+## Version
+
+**Current Version:** 1.0.0
+
+**Last Updated:** 2025-10-24
+
+## Updating Catalog Prices (bulk)
+
+Keep the shared catalog current in one click:
+
+1. Open the extension popup (from any page).
+2. Click **"Update Catalog Prices"**.
+3. The extension opens each catalog item's product page in a quiet background tab,
+   re-reads its case cost, and updates the catalog when the price changed
+   (recommended price is recomputed keeping the same markup). A progress bar shows
+   `done/total`; **Cancel** stops it.
+4. When finished you get a summary: Updated / Unchanged / Skipped / Failed.
+
+The sweep runs in the background service worker, so it keeps going even if you
+close the popup — reopen it to see live progress. Requires the `tabs` permission.
