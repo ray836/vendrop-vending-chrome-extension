@@ -67,12 +67,19 @@ Request body:
   shelfLifeDays?: number | null;         // Optional
   recommendedPrice?: number;             // Optional: overrides computed price
   recommendedPriceMultiplier?: number;   // Optional: Default 1.5 (price = caseCost/caseSize * multiplier)
+  images?: string[];                     // Optional: the vendor's whole photo gallery (see below)
 }
 
 Response:
 {
   success: boolean;
-  action: "created" | "exists";   // "exists" = a catalog row with this vendorSku+region already existed
+  action: "created" | "updated" | "exists";
+  // "created" = new catalog row
+  // "updated" = a row with this vendorSku+region existed and its case cost changed;
+  //             caseCost/caseSize are refreshed and recommendedPrice is recomputed
+  //             preserving the row's existing markup ratio (same rule as PATCH)
+  // "exists"  = the row existed and nothing changed
+  previousCaseCost?: number;      // present when the row already existed
   product: {
     id: string;
     name: string;
@@ -283,32 +290,100 @@ When modifying this extension:
 
 See also: `/Users/raygrant/Documents/simple-vendrop/simple-vending-app/API_DOCS.md`
 
-## Bulk Price Sweep ("Update Catalog Prices")
+## Product Image Capture (for machine-photo slot matching)
 
-One-click job that keeps the shared catalog's prices current. Lives in the popup
-panel (visible on the main and "not supported" views, since it can run from any
-page).
+A vending slot holds a **single unit** (one 2 oz bag), but a warehouse retailer's
+hero image is the **case** (a 40-pack carton). The two look nothing alike, so the
+catalog's `image` field is useless as a visual reference when identifying products
+in a photo of a stocked machine.
 
 **Flow:**
-1. Popup sends `START_CATALOG_UPDATE` to the background service worker and polls
-   `GET_UPDATE_PROGRESS` (progress is persisted in `chrome.storage.local` under
-   `catalogUpdate`, so closing/reopening the popup is safe). `CANCEL_CATALOG_UPDATE`
-   requests a stop.
-2. Background worker `GET`s the whole catalog: `GET /api/catalog` with
-   `Authorization: Bearer <token>` (maintainer path returns the raw list incl.
-   `id` + `vendorLink`; the Clerk/owner path still returns the org-scoped view).
-3. For each item with a Sam's Club/Costco `vendorLink`, it opens the page as a
-   **quiet inactive background tab**, waits for load, re-scrapes via the content
-   script (`GET_PRODUCT_INFO`), closes the tab, and compares `case_cost`.
-4. If the case cost changed (≥ $0.01), it calls
-   `PATCH /api/catalog { id, caseCost }`, which updates `caseCost` and recomputes
-   `recommendedPrice` **preserving the item's existing markup ratio**.
-5. Tabs are processed sequentially with a short delay (polite; avoids bot-blocks).
-   A summary reports Updated / Unchanged / Skipped (no vendor link) / Failed.
+1. `content.js` `collectGalleryImages()` scrapes the page's whole photo gallery —
+   the hero (`img[id^="hero-image-default-"]` on Sam's), the carousel, and any
+   JSON-LD image array — deduped by asset path, capped at 8.
+2. The importer posts them as `images: string[]` to `POST /api/catalog`.
+3. The route calls `src/lib/classifyProductImages.ts` (Claude vision), which tags
+   each image `unit_front | case_front | nutrition_label | back_panel | lifestyle
+   | other` and picks the best **`unit_front`** as the recognition image. Nutrition
+   panels, ingredient text, and back-of-box shots are filtered out here — they
+   can't be told apart by URL or alt text.
+4. Stored on `standard_products` as `images` (jsonb) + `recognition_image` (text).
+   `image` is left untouched, so existing UI is unaffected.
 
-**Requires** the `tabs` permission (added to `manifest.json`) to open/close tabs
-and detect load completion.
+Classification failures are non-fatal: the URLs are still stored, tagged `other`.
+Re-importing a product that predates this backfills its images.
 
-**Limitations:** if the MV3 service worker is killed mid-sweep the in-memory loop
+**Consumer:** `POST /api/ai/analyze-machine` with `analysisType: "slot_layout"`
+maps a machine photo to catalog products. It now sends each product's
+`recognition_image` as a labeled reference photo alongside the machine photo, so
+matching is visual rather than a guess from the product name (names + aliases are
+still sent, and are the fallback for products with no reference photo).
+
+Two details in that request are deliberate:
+- **Reference photos are downscaled, the machine photo is not.** The vendor CDN
+  serves 1500x1500 originals (~3,000 image tokens each); `thumbnail()` appends
+  `?odnWidth=320&odnHeight=320`, which costs ~180 tokens. The machine photo stays
+  full-resolution — that's what makes the shelf labels legible.
+- **The reference block is prompt-cached** (`cache_control` on the last reference
+  image, machine photo after it). The catalog is identical across every machine
+  setup, so only the first run pays for it. Note Opus 4.8 has a 4,096-token
+  minimum cacheable prefix: with fewer than ~25 reference products the cache
+  silently won't engage. That's harmless, just not yet a saving.
+
+## Catalog Refresh ("Refresh Catalog")
+
+One-click job that re-scrapes every catalog item's vendor page and writes back
+**anything that changed** — price, name, description, images, barcode — then scans
+for duplicates. (This replaced a price-only sweep; the old `PATCH /api/catalog`
+price-only endpoint still exists but the refresh job no longer uses it.)
+
+**Flow:**
+1. Popup sends `START_CATALOG_UPDATE` and polls `GET_UPDATE_PROGRESS` (progress is
+   persisted in `chrome.storage.local` under `catalogUpdate`, so closing/reopening
+   the popup is safe). `CANCEL_CATALOG_UPDATE` requests a stop.
+2. Background worker `GET`s the whole catalog with the maintainer Bearer token.
+3. For each item with a Sam's/Costco `vendorLink`, it navigates a **single reused
+   foreground tab** to the page, re-scrapes via the content script, and `POST`s the
+   result to `/api/catalog` **keyed by `id`** — see the gotcha below.
+4. The API's `refreshExisting()` diffs each field, writes only what moved, and
+   returns `changedFields`. Pricing recomputes `recommendedPrice` **preserving the
+   item's existing markup ratio**, so an owner's hand-tuned sell price survives a
+   cost change. Fields the scrape couldn't read are left alone — a failed scrape
+   must never null out good data.
+5. Afterwards it calls `GET /api/catalog?duplicates=1` and shows any groups.
+
+> ⚠️ **Refresh targets rows by `id`, never by `vendorSku`.** Legacy seed rows have
+> no `vendorSku`, so a SKU-keyed write would miss them and *create a second row*
+> instead of updating the one being refreshed. Refreshing a row that has no SKU also
+> heals it — the scraped SKU is written in, so it starts deduping on future imports.
+
+**Import and refresh share one server code path** (`createStandardProduct` →
+`refreshExisting`), so they cannot drift apart.
+
+### Duplicate detection
+
+`findCatalogDuplicates()` flags a pair only when **the barcodes match exactly**, or
+**one name contains the other AND the case sizes are equal**.
+
+Name similarity alone is not enough, and this is not hypothetical: "Jack Link's
+Original Beef Sticks, 0.92 oz." (20 ct) and "Jack Link's Original Tender Style Beef
+Steak" (15 ct) share a name prefix but are *different products*. Requiring an equal
+case size rejects them — the same size-variant hazard `generateProductAliases.ts`
+guards against.
+
+Duplicates are **flagged, never auto-deleted**: a false positive would destroy a real
+product, so the maintainer picks which row to keep.
+
+### Deleting a duplicate
+
+`DELETE /api/catalog { id, mergeIntoId? }`. Org products cloned from a catalog row
+FK-reference it (`products.sourceStandardId`), so a naive delete throws. The handler
+**repoints those clones onto `mergeIntoId` (the row you kept) before deleting**, so
+no owner's stocked product is lost. Omit `mergeIntoId` and the clones simply lose
+their catalog link and become standalone custom products.
+
+**Requires** the `tabs` permission to open/close tabs and detect load completion.
+
+**Limitations:** if the MV3 service worker is killed mid-run the in-memory loop
 stops; on next load a stale `running` state is reconciled to `interrupted`. Prices
 that render only after login/club-selection rely on the user's own browser session.

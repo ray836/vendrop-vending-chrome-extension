@@ -11,6 +11,7 @@
     <header>
       <h1>VenDrop</h1>
       <p class="subtitle">Product Importer</p>
+      <span id="version-badge" class="version-badge"></span>
     </header>
 
     <div id="content">
@@ -270,13 +271,43 @@
         </div>
       </div>
 
+      <!-- Tiles checked on listing pages (persistent across main / not-supported views) -->
+      <div id="selection-panel" class="hidden">
+        <hr class="panel-divider">
+        <div class="selection-header">
+          <span id="selection-count">0 selected</span>
+          <a href="#" id="clear-selection-link">Clear</a>
+        </div>
+        <ul id="selection-list"></ul>
+
+        <button id="import-selected-btn" class="btn btn-primary btn-block">
+          Add Selected to Catalog
+        </button>
+        <p class="panel-hint">Opens each product page in turn to read case size, item number, and barcode.</p>
+
+        <div id="import-progress" class="hidden">
+          <div class="progress-row">
+            <span id="import-progress-label">Starting…</span>
+            <span id="import-progress-count">0/0</span>
+          </div>
+          <div class="progress-track">
+            <div id="import-progress-bar" class="progress-fill"></div>
+          </div>
+          <p id="import-current" class="update-current"></p>
+          <button id="cancel-import-btn" class="btn btn-secondary btn-small">Cancel</button>
+          <div id="import-extracted" class="hidden"></div>
+        </div>
+
+        <div id="import-summary" class="hidden"></div>
+      </div>
+
       <!-- Catalog price sweep (persistent across main / not-supported views) -->
       <div id="catalog-update-panel" class="hidden">
         <hr class="panel-divider">
         <button id="update-catalog-btn" class="btn btn-secondary btn-block">
-          Update Catalog Prices
+          Refresh Catalog
         </button>
-        <p class="panel-hint">Visits every catalog item's page and refreshes changed case costs.</p>
+        <p class="panel-hint">Revisits every catalog item's page and updates anything that changed — price, name, description, images. Exact-barcode duplicates are merged automatically; looser matches are flagged for you.</p>
 
         <div id="update-progress" class="hidden">
           <div class="progress-row">
@@ -288,9 +319,11 @@
           </div>
           <p id="update-current" class="update-current"></p>
           <button id="cancel-update-btn" class="btn btn-secondary btn-small">Cancel</button>
+          <div id="update-extracted" class="hidden"></div>
         </div>
 
         <div id="update-summary" class="hidden"></div>
+        <div id="update-duplicates" class="hidden"></div>
       </div>
     </div>
   </div>

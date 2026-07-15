@@ -20,11 +20,24 @@ body {
 }
 
 header {
+  position: relative;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
   padding: 20px;
   text-align: center;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.version-badge {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  padding: 2px 7px;
 }
 
 header h1 {
@@ -585,4 +598,528 @@ header h1 {
   padding-top: 8px;
   border-top: 1px solid #e5e5e5;
   color: #a33;
+}
+
+/* ===== Listing-page selection queue ===== */
+.selection-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #333;
+}
+
+.selection-header a {
+  font-weight: 400;
+  font-size: 12px;
+  color: #0067a0;
+  text-decoration: none;
+}
+
+#selection-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  max-height: 132px;
+  overflow-y: auto;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+}
+
+#selection-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: #444;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+#selection-list li:last-child {
+  border-bottom: none;
+}
+
+#selection-list .selection-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#selection-list .selection-remove {
+  flex: none;
+  border: none;
+  background: none;
+  color: #999;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+#selection-list .selection-remove:hover {
+  color: #c0392b;
+}
+
+/* Import summary mirrors the price-sweep summary. */
+#import-summary {
+  margin-top: 12px;
+  padding: 10px;
+  background: #f7f7f7;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #444;
+}
+
+#import-summary .summary-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+#import-summary .summary-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+}
+
+#import-summary .summary-row .val {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+#import-summary .summary-added .val { color: #0a7d33; }
+#import-summary .summary-failed .val { color: #c0392b; }
+
+#import-summary .summary-errors {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #e5e5e5;
+  color: #a33;
+}
+
+/* ===== Import result details (collapsible) ===== */
+#import-summary .summary-updated .val { color: #0a58a2; }
+
+.result-details {
+  margin-top: 10px;
+  border-top: 1px solid #e5e5e5;
+  padding-top: 8px;
+}
+
+.result-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #0067a0;
+  font-size: 12px;
+  list-style: revert;
+}
+
+.result-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.result-item {
+  display: flex;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid #ececec;
+}
+
+.result-item:last-child {
+  border-bottom: none;
+}
+
+.result-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #eee;
+}
+
+.result-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.result-name {
+  font-weight: 600;
+  font-size: 12px;
+  color: #222;
+  margin-bottom: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  color: #666;
+  line-height: 1.5;
+}
+
+.result-tag {
+  font-weight: 600;
+  border-radius: 10px;
+  padding: 1px 6px;
+  font-size: 10px;
+}
+
+.result-added { background: #e3f6e8; color: #0a7d33; }
+.result-updated { background: #e3edf9; color: #0a58a2; }
+.result-existed { background: #eee; color: #666; }
+
+.result-change {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #0a58a2;
+  font-weight: 600;
+}
+
+/* ===== Live "what we extracted" card during an import ===== */
+#import-extracted {
+  margin: 10px 0;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  animation: slideIn 0.2s ease-out;
+}
+
+.extract-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.extract-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #fafafa;
+  border: 1px solid #eee;
+}
+
+.extract-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #222;
+  line-height: 1.3;
+  margin-bottom: 4px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.extract-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  padding: 2px 0;
+}
+
+.extract-label {
+  color: #888;
+}
+
+.extract-value {
+  font-weight: 600;
+  color: #333;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extract-value.missing {
+  color: #c0392b;
+  font-weight: 400;
+  font-style: italic;
+}
+
+.extract-error {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #f0f0f0;
+  font-size: 11px;
+  color: #c0392b;
+}
+
+.result-failed { background: #fdecea; color: #c0392b; }
+
+/* ===== Duplicate flagging (catalog refresh) ===== */
+#update-duplicates {
+  margin-top: 12px;
+  padding: 10px;
+  background: #fff8e6;
+  border: 1px solid #f0dca8;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #444;
+}
+
+#update-duplicates .summary-title {
+  font-weight: 600;
+  color: #8a6100;
+  margin-bottom: 4px;
+}
+
+#update-duplicates .panel-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #7a6a45;
+}
+
+.dup-group {
+  background: #fff;
+  border: 1px solid #eadfc2;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+}
+
+.dup-group:last-child {
+  margin-bottom: 0;
+}
+
+.dup-reason {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #a08442;
+  margin-bottom: 4px;
+}
+
+.dup-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-top: 1px solid #f3ece0;
+}
+
+.dup-row:first-of-type {
+  border-top: none;
+}
+
+.dup-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.dup-delete {
+  flex: none;
+  border: 1px solid #e0b4b4;
+  background: #fff;
+  color: #c0392b;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dup-delete:hover:not(:disabled) {
+  background: #fdecea;
+}
+
+.dup-delete:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* What moved on this item during a refresh */
+.extract-changed,
+.extract-nochange {
+  margin: 6px 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 6px;
+  border-radius: 5px;
+}
+
+.extract-changed {
+  background: #e3edf9;
+  color: #0a58a2;
+}
+
+.extract-nochange {
+  background: #f2f2f2;
+  color: #777;
+  font-weight: 400;
+}
+
+/* Usage signals on a duplicate row */
+.dup-inuse {
+  background: #e3f6e8;
+  color: #0a7d33;
+  font-weight: 600;
+  font-size: 10px;
+  border-radius: 10px;
+  padding: 1px 6px;
+}
+
+.dup-unused {
+  color: #999;
+  font-style: italic;
+}
+
+#update-summary .summary-merged .val { color: #0a58a2; }
+
+/* ===== Focus mode: a bulk job is running =====
+   Nothing here is actionable mid-run — the Add/Review buttons are disabled, the
+   page-info box just repeats the progress label, and the panel blurb has already
+   been read. Collapsing them keeps the live product card above the fold. */
+body.job-running #page-info,
+body.job-running #main-view .button-group,
+body.job-running #main-view .settings-link,
+body.job-running #main-view #status-message,
+body.job-running #selection-panel,
+body.job-running #catalog-update-panel .panel-hint,
+body.job-running #catalog-update-panel .panel-divider {
+  display: none !important;
+}
+
+body.job-running header {
+  padding: 8px 20px;
+}
+
+body.job-running header h1 {
+  font-size: 16px;
+  margin-bottom: 0;
+}
+
+body.job-running .subtitle {
+  display: none;
+}
+
+body.job-running #content {
+  padding: 12px 16px;
+}
+
+body.job-running .view {
+  gap: 8px;
+}
+
+/* The live card is the point — give it room, tighten everything around it. */
+body.job-running #import-extracted,
+body.job-running #update-extracted {
+  margin: 8px 0 4px;
+}
+
+body.job-running .extract-thumb {
+  width: 48px;
+  height: 48px;
+}
+
+/* ===== Live run feed (newest first) ===== */
+#update-extracted,
+#import-extracted {
+  margin-top: 10px;
+  border-top: 1px solid #e5e5e5;
+}
+
+.feed-item {
+  display: flex;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f0f0f0;
+  animation: slideIn 0.2s ease-out;
+}
+
+.feed-item:last-child {
+  border-bottom: none;
+}
+
+.feed-thumb {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #fafafa;
+  border: 1px solid #eee;
+}
+
+.feed-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.feed-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #222;
+  line-height: 1.3;
+  margin-bottom: 3px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.feed-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+  color: #666;
+  line-height: 1.5;
+}
+
+.feed-facts {
+  font-variant-numeric: tabular-nums;
+  color: #888;
+}
+
+.feed-facts em {
+  color: #c0392b;
+  font-style: italic;
+}
+
+.feed-changed {
+  color: #0a58a2;
+  font-weight: 600;
+}
+
+.feed-nochange {
+  color: #aaa;
+}
+
+.feed-delta {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #0a58a2;
+  font-variant-numeric: tabular-nums;
+}
+
+.feed-error {
+  margin-top: 3px;
+  font-size: 11px;
+  color: #c0392b;
 }

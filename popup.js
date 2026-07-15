@@ -1,3 +1,14 @@
+const FIELD_LABEL = {
+  caseCost: 'price',
+  caseSize: 'case size',
+  images: 'images',
+  name: 'name',
+  description: 'description',
+  barcode: 'barcode',
+  vendorSku: 'SKU',
+  image: 'main image',
+};
+
 // UI Elements - Views
 const settingsView = document.getElementById('settings-view');
 const mainView = document.getElementById('main-view');
@@ -59,6 +70,23 @@ const updateProgressBar = document.getElementById('update-progress-bar');
 const updateCurrent = document.getElementById('update-current');
 const cancelUpdateBtn = document.getElementById('cancel-update-btn');
 const updateSummary = document.getElementById('update-summary');
+const updateDuplicates = document.getElementById('update-duplicates');
+const updateExtracted = document.getElementById('update-extracted');
+
+// UI Elements - Listing-page selection queue
+const selectionPanel = document.getElementById('selection-panel');
+const selectionCount = document.getElementById('selection-count');
+const selectionList = document.getElementById('selection-list');
+const clearSelectionLink = document.getElementById('clear-selection-link');
+const importSelectedBtn = document.getElementById('import-selected-btn');
+const importProgress = document.getElementById('import-progress');
+const importProgressLabel = document.getElementById('import-progress-label');
+const importProgressCount = document.getElementById('import-progress-count');
+const importProgressBar = document.getElementById('import-progress-bar');
+const importCurrent = document.getElementById('import-current');
+const cancelImportBtn = document.getElementById('cancel-import-btn');
+const importSummary = document.getElementById('import-summary');
+const importExtracted = document.getElementById('import-extracted');
 
 // State
 let currentPageInfo = null;
@@ -67,12 +95,28 @@ let settings = null;
 
 // Initialize popup
 async function init() {
+  // Surfaced so it's obvious at a glance whether the loaded build is current.
+  document.getElementById('version-badge').textContent = `v${chrome.runtime.getManifest().version}`;
+
   // Load settings
   settings = await loadSettings();
 
   // Check if settings are configured
   if (!settings.catalogToken) {
     showView('settings');
+    return;
+  }
+
+  // During either bulk job the active tab is our own work tab, so don't present it
+  // as a product the user picked — show the run instead. (The popup stays open across
+  // the work tab's navigations, so init() runs once; the poll keeps it current.)
+  const [importing, refreshing] = await Promise.all([
+    isImportRunning(),
+    isRefreshRunning(),
+  ]);
+  if (importing || refreshing) {
+    showView('main');
+    showJobRunning(refreshing ? 'Refreshing catalog…' : 'Bulk import in progress…');
     return;
   }
 
@@ -103,6 +147,16 @@ async function init() {
     if (response?.success && response.productInfo) {
       currentProductData = response.productInfo;
       console.log('[VenDrop] Product data received:', currentProductData);
+
+      // A browse/search grid isn't a single product — it's the multi-select flow,
+      // so don't nag about the fields a listing page was never going to have.
+      if (!currentProductData.name) {
+        productPreview.classList.add('hidden');
+        pageStatus.textContent = 'Check the products you want, then add them below.';
+        addProductBtn.disabled = true;
+        editBtn.disabled = true;
+        return;
+      }
 
       // Show preview
       showProductPreview(currentProductData);
@@ -209,7 +263,13 @@ function showView(viewName) {
   // the main and not-supported views (but not while configuring / editing).
   const showPanel = viewName === 'main' || viewName === 'not-supported';
   catalogUpdatePanel.classList.toggle('hidden', !showPanel);
-  if (showPanel) pollProgressOnce();
+  if (showPanel) {
+    pollProgressOnce();
+    renderSelection();
+    pollImportOnce();
+  } else {
+    selectionPanel.classList.add('hidden');
+  }
 }
 
 // Update page info in main view
@@ -352,6 +412,7 @@ async function saveProduct(productData) {
         recommendedPriceMultiplier: productData.price_multiplier || 1.5,
         region: productData.region || null,
         shelfLifeDays: productData.shelf_life_days ? parseInt(productData.shelf_life_days) : null,
+        images: productData.images || [],
       })
     });
 
@@ -514,6 +575,9 @@ function escapeHtml(s) {
 }
 
 function renderProgress(p) {
+  refreshIsRunning = !!(p && p.running);
+  syncJobChrome();
+
   // No job has ever run: just show the button.
   if (!p) {
     updateProgress.classList.add('hidden');
@@ -523,8 +587,14 @@ function renderProgress(p) {
   }
 
   if (p.running) {
+    // The refresh owns the active tab — keep the single-product UI and the selection
+    // queue out of the way, so the run is the only thing on screen.
+    showJobRunning('Refreshing catalog…');
+    selectionPanel.classList.add('hidden');
+
     updateCatalogBtn.classList.add('hidden');
     updateSummary.classList.add('hidden');
+    updateDuplicates.classList.add('hidden');
     updateProgress.classList.remove('hidden');
 
     const total = p.total || 0;
@@ -536,8 +606,11 @@ function renderProgress(p) {
       ? 'Canceling…'
       : p.phase === 'loading'
       ? 'Loading catalog…'
-      : 'Updating prices…';
+      : p.phase === 'duplicates'
+      ? 'Checking for duplicates…'
+      : 'Refreshing catalog…';
     updateCurrent.textContent = p.currentName ? `Checking: ${p.currentName}` : '';
+    renderFeedInto(updateExtracted, p.feed);
     cancelUpdateBtn.disabled = !!p.canceling;
     return;
   }
@@ -546,17 +619,19 @@ function renderProgress(p) {
   updateProgress.classList.add('hidden');
   updateCatalogBtn.classList.remove('hidden');
   updateCatalogBtn.disabled = false;
+  // Keep the feed up after the run — it's the record of what just happened.
+  renderFeedInto(updateExtracted, p.feed);
   if (p.done) renderSummary(p);
 }
 
 function renderSummary(p) {
   const title = p.error
-    ? 'Update failed'
+    ? 'Refresh failed'
     : p.canceled
-    ? 'Update canceled'
+    ? 'Refresh canceled'
     : p.interrupted
-    ? 'Update interrupted'
-    : 'Update complete';
+    ? 'Refresh interrupted'
+    : 'Refresh complete';
 
   let errorsHtml = '';
   if (p.error) {
@@ -575,9 +650,139 @@ function renderSummary(p) {
     <div class="summary-row"><span>Unchanged</span><span class="val">${p.unchanged || 0}</span></div>
     <div class="summary-row"><span>Skipped (no vendor link)</span><span class="val">${p.skipped || 0}</span></div>
     <div class="summary-row summary-failed"><span>Failed</span><span class="val">${p.failed || 0}</span></div>
+    ${renderChanges(p.changes)}
+    ${renderMerged(p.merged)}
     ${errorsHtml}
   `;
   updateSummary.classList.remove('hidden');
+  renderDuplicates(p.duplicates);
+}
+
+// Auto-merges are destructive and permanent, so they're always reported — never a
+// silent side effect of hitting Refresh.
+function renderMerged(merged) {
+  if (!merged || !merged.length) return '';
+
+  const rows = merged.map((m) => {
+    const moved = m.reassignedClones
+      ? ` &middot; ${m.reassignedClones} org product${m.reassignedClones === 1 ? '' : 's'} moved over`
+      : '';
+    return `
+      <li class="result-item">
+        <div class="result-body">
+          <div class="result-name">${escapeHtml(m.kept)}</div>
+          <div class="result-meta">
+            <span>kept the ${formatDate(m.keptAdded)} entry, removed the ${formatDate(m.deletedAdded)} one${moved}</span>
+          </div>
+        </div>
+      </li>`;
+  }).join('');
+
+  return `
+    <div class="summary-row summary-merged"><span>Duplicates merged</span><span class="val">${merged.length}</span></div>
+    <details class="result-details">
+      <summary>View ${merged.length} merge${merged.length === 1 ? '' : 's'}</summary>
+      <ul class="result-list">${rows}</ul>
+    </details>
+  `;
+}
+
+// What actually moved, per item — "3 updated" alone doesn't tell you whether a
+// price shifted or a photo was swapped.
+function renderChanges(changes) {
+  if (!changes || !changes.length) return '';
+
+  const rows = changes.map((c) => {
+    const fields = (c.fields || []).map((f) => FIELD_LABEL[f] || f).join(', ');
+    const priceMoved =
+      (c.fields || []).includes('caseCost') && typeof c.previousCaseCost === 'number';
+    const delta = priceMoved
+      ? `<div class="result-change">Case cost ${money(c.previousCaseCost)} &rarr; ${money(c.caseCost)}${
+          typeof c.recommendedPrice === 'number' ? ` &middot; sell ${money(c.recommendedPrice)}` : ''
+        }</div>`
+      : '';
+    return `
+      <li class="result-item">
+        <div class="result-body">
+          <div class="result-name">${escapeHtml(c.name || 'Unnamed')}</div>
+          <div class="result-meta"><span>${escapeHtml(fields)}</span></div>
+          ${delta}
+        </div>
+      </li>`;
+  }).join('');
+
+  return `
+    <details class="result-details">
+      <summary>View ${changes.length} change${changes.length === 1 ? '' : 's'}</summary>
+      <ul class="result-list">${rows}</ul>
+    </details>
+  `;
+}
+
+// Suspected duplicate rows, flagged but never auto-deleted — a false positive here
+// would delete a real product, so the choice stays with the maintainer.
+function renderDuplicates(groups) {
+  if (!groups || !groups.length) {
+    updateDuplicates.classList.add('hidden');
+    return;
+  }
+
+  updateDuplicates.innerHTML = `
+    <div class="summary-title">Needs your call (${groups.length})</div>
+    <p class="panel-hint">Exact barcode matches were merged automatically. These matched on name and case size only — a rule loose enough to catch two genuinely different products — so the choice is yours. Deleting is safe either way: org products move onto the row you keep, and no sales history is lost.</p>
+    ${groups.map((g, gi) => {
+      // The row an org has actually picked up is the one worth keeping, so surface it.
+      const inUse = (prod) => (prod.usage?.clones || 0) > 0 || (prod.usage?.unitsSold || 0) > 0;
+      return `
+      <div class="dup-group">
+        <div class="dup-reason">${g.reason === 'barcode' ? 'Same barcode' : 'Same name + case size'}</div>
+        ${g.products.map((prod) => `
+          <div class="dup-row">
+            <div class="dup-body">
+              <div class="result-name">${escapeHtml(prod.name)}</div>
+              <div class="result-meta">
+                <span>${money(prod.caseCost)} / ${prod.caseSize} ct</span>
+                <span>Added ${formatDate(prod.createdAt)}</span>
+              </div>
+              <div class="result-meta">
+                ${usageLabel(prod.usage)}
+                ${inUse(prod) ? '<span class="dup-inuse">in use</span>' : ''}
+              </div>
+            </div>
+            <button class="dup-delete" data-group="${gi}" data-id="${escapeHtml(prod.id)}">Delete</button>
+          </div>
+        `).join('')}
+      </div>
+    `;
+    }).join('')}
+  `;
+
+  updateDuplicates.querySelectorAll('.dup-delete').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.id;
+      const group = groups[Number(btn.dataset.group)];
+      // The survivor is whichever row in the group we're not deleting.
+      const keep = group.products.find((prod) => prod.id !== id);
+
+      btn.disabled = true;
+      btn.textContent = 'Deleting…';
+      const resp = await chrome.runtime.sendMessage({
+        type: 'DELETE_DUPLICATE',
+        id,
+        mergeIntoId: keep ? keep.id : null,
+      });
+
+      if (resp && resp.success) {
+        pollProgressOnce(); // re-renders from the trimmed duplicate list
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Delete';
+        showStatus(`✗ ${(resp && resp.error) || 'Delete failed'}`, 'error');
+      }
+    });
+  });
+
+  updateDuplicates.classList.remove('hidden');
 }
 
 async function pollProgressOnce() {
@@ -617,6 +822,411 @@ cancelUpdateBtn.addEventListener('click', async () => {
   } catch (e) {
     // ignore
   }
+});
+
+// ===== Listing-page selection queue =====
+// Tiles checked on a browse/search grid land in storage.local. Importing them
+// runs in the background worker (foreground tab per product), so the popup only
+// triggers it and polls progress.
+let importPollTimer = null;
+let importState = null;
+
+async function isRefreshRunning() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'GET_UPDATE_PROGRESS' });
+    return !!(resp && resp.progress && resp.progress.running);
+  } catch (e) {
+    return false; // Background worker asleep — nothing is running.
+  }
+}
+
+// A bulk job owns the active tab. Strip the single-product UI so a stale preview of
+// whatever page the job happens to be on can't be mistaken for the current page —
+// or, worse, imported by an Add button that's still live.
+function showJobRunning(label) {
+  retailerBadge.textContent = "Sam's Club";
+  retailerBadge.className = 'retailer-badge samsclub';
+  productPreview.classList.add('hidden');
+  pageStatus.textContent = label;
+  addProductBtn.disabled = true;
+  editBtn.disabled = true;
+}
+
+// While a job runs, the only thing worth screen space is the run itself. `job-running`
+// on <body> collapses the page header, the disabled Add/Review buttons, the settings
+// link and the panel blurb (see popup.css), so the live product card fits without
+// scrolling. Tracked per job so one finishing doesn't un-collapse while the other runs.
+let refreshIsRunning = false;
+let importIsRunning = false;
+
+function syncJobChrome() {
+  document.body.classList.toggle('job-running', refreshIsRunning || importIsRunning);
+}
+
+async function isImportRunning() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'GET_IMPORT_PROGRESS' });
+    return !!(resp && resp.progress && resp.progress.running);
+  } catch (e) {
+    return false; // Background worker asleep — nothing is running.
+  }
+}
+
+function syncSelectionPanel(count) {
+  const visible = count > 0 || !!(importState && (importState.running || importState.done));
+  selectionPanel.classList.toggle('hidden', !visible);
+}
+
+async function renderSelection() {
+  const r = await chrome.storage.local.get('selection');
+  const items = Object.values(r.selection || {});
+
+  selectionCount.textContent = `${items.length} selected`;
+  selectionList.innerHTML = '';
+
+  items.forEach((item) => {
+    const li = document.createElement('li');
+
+    const name = document.createElement('span');
+    name.className = 'selection-name';
+    name.textContent = item.name || item.id;
+    name.title = item.name || '';
+
+    const remove = document.createElement('button');
+    remove.className = 'selection-remove';
+    remove.textContent = '✕';
+    remove.title = 'Remove';
+    remove.addEventListener('click', async () => {
+      const cur = await chrome.storage.local.get('selection');
+      const selection = cur.selection || {};
+      delete selection[item.id];
+      await chrome.storage.local.set({ selection });
+      renderSelection();
+    });
+
+    li.appendChild(name);
+    li.appendChild(remove);
+    selectionList.appendChild(li);
+  });
+
+  const running = !!(importState && importState.running);
+  importSelectedBtn.disabled = items.length === 0 || running;
+  importSelectedBtn.textContent = items.length
+    ? `Add ${items.length} to Catalog`
+    : 'Add Selected to Catalog';
+
+  syncSelectionPanel(items.length);
+}
+
+function renderImportProgress(p) {
+  importState = p;
+  importIsRunning = !!(p && p.running);
+  syncJobChrome();
+
+  if (!p) {
+    importProgress.classList.add('hidden');
+    importSelectedBtn.classList.remove('hidden');
+    return;
+  }
+
+  if (p.running) {
+    importSelectedBtn.classList.add('hidden');
+    importSummary.classList.add('hidden');
+    importProgress.classList.remove('hidden');
+
+    const total = p.total || 0;
+    const processed = p.processed || 0;
+    importProgressBar.style.width = `${total > 0 ? Math.round((processed / total) * 100) : 0}%`;
+    importProgressCount.textContent = `${processed}/${total}`;
+    importProgressLabel.textContent = p.canceling ? 'Canceling…' : 'Importing…';
+    importCurrent.textContent = p.currentName ? `Visiting: ${p.currentName}` : '';
+    renderFeedInto(importExtracted, p.feed);
+    cancelImportBtn.disabled = !!p.canceling;
+    return;
+  }
+
+  importProgress.classList.add('hidden');
+  importSelectedBtn.classList.remove('hidden');
+  renderFeedInto(importExtracted, p.feed);
+  if (p.done) renderImportSummary(p);
+}
+
+function renderImportSummary(p) {
+  const title = p.error
+    ? 'Import failed'
+    : p.canceled
+    ? 'Import canceled'
+    : p.interrupted
+    ? 'Import interrupted'
+    : 'Import complete';
+
+  let errorsHtml = '';
+  if (p.error) {
+    errorsHtml = `<div class="summary-errors">${escapeHtml(p.error)}</div>`;
+  } else if (p.errors && p.errors.length) {
+    const rows = p.errors.slice(0, 5)
+      .map((e) => `${escapeHtml(e.name || 'item')}: ${escapeHtml(e.error)}`)
+      .join('<br>');
+    const more = p.errors.length > 5 ? `<br>+${p.errors.length - 5} more` : '';
+    errorsHtml = `<div class="summary-errors">${rows}${more}</div>`;
+  }
+
+  importSummary.innerHTML = `
+    <div class="summary-title">${title}</div>
+    <div class="summary-row summary-added"><span>Added</span><span class="val">${p.added || 0}</span></div>
+    <div class="summary-row summary-updated"><span>Updated (price changed)</span><span class="val">${p.updated || 0}</span></div>
+    <div class="summary-row"><span>Unchanged</span><span class="val">${p.existed || 0}</span></div>
+    <div class="summary-row summary-failed"><span>Failed</span><span class="val">${p.failed || 0}</span></div>
+    ${renderResultsDetails(p.results)}
+    ${errorsHtml}
+  `;
+  importSummary.classList.remove('hidden');
+}
+
+const KIND_LABEL = { added: 'Added', updated: 'Updated', existed: 'Unchanged', failed: 'Failed' };
+
+// What the extractor actually read off the page, held on screen briefly after
+// each item so a bad scrape is visible as it happens rather than in the summary.
+// A running log of everything the job has processed, newest first. Each item takes
+// ~5s to visit and scrape, so a card that cleared itself left the popup blank most of
+// the time. Nothing is cleared here — results stack up and stay readable.
+// Rows already on screen, per container. The popup re-polls every 800ms, and rebuilding
+// innerHTML each time re-created every node — which re-fired the entry animation and
+// forced the thumbnails to reload, so the whole list visibly blinked once a second.
+// Only genuinely new entries get inserted now; existing rows are never touched.
+const feedRendered = new Map();
+
+const feedKey = (x) => `${x.at}|${x.name}`;
+
+function renderFeedInto(el, feed) {
+  if (!el) return;
+
+  if (!feed || !feed.length) {
+    el.classList.add('hidden');
+    el.innerHTML = '';
+    feedRendered.delete(el); // a new run resets the feed — start clean
+    return;
+  }
+
+  let seen = feedRendered.get(el);
+  if (!seen) {
+    seen = new Set();
+    feedRendered.set(el, seen);
+    el.innerHTML = '';
+  }
+
+  // The feed is newest-first. Walk it oldest-to-newest and prepend, so the newest
+  // entry ends up on top and each new row animates in exactly once.
+  for (let i = feed.length - 1; i >= 0; i--) {
+    const x = feed[i];
+    const key = feedKey(x);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = renderFeedItem(x);
+    const node = wrapper.firstElementChild;
+    if (node) el.prepend(node);
+  }
+
+  el.classList.remove('hidden');
+}
+
+function renderFeedItem(x) {
+  const changed = Array.isArray(x.changed)
+    ? x.changed.length
+      ? `<span class="feed-changed">${escapeHtml(
+          x.changed.map((f) => FIELD_LABEL[f] || f).join(', ')
+        )}</span>`
+      : '<span class="feed-nochange">no changes</span>'
+    : '';
+
+  const priceMoved =
+    Array.isArray(x.changed) && x.changed.includes('caseCost') &&
+    typeof x.previousCaseCost === 'number';
+
+  return `
+    <div class="feed-item">
+      ${x.image ? `<img class="feed-thumb" src="${escapeHtml(x.image)}" alt="">` : '<div class="feed-thumb"></div>'}
+      <div class="feed-body">
+        <div class="feed-name">${escapeHtml(x.name || 'Unnamed')}</div>
+        <div class="feed-meta">
+          <span class="result-tag result-${x.outcome}">${KIND_LABEL[x.outcome] || x.outcome}</span>
+          ${changed}
+        </div>
+        <div class="feed-meta feed-facts">
+          <span>${x.caseCost ? `$${escapeHtml(String(x.caseCost))}` : '<em>no price</em>'}</span>
+          <span>${x.caseSize ? `${escapeHtml(String(x.caseSize))} ct` : '<em>no size</em>'}</span>
+          ${x.barcode ? `<span>${escapeHtml(x.barcode)}</span>` : ''}
+        </div>
+        ${priceMoved ? `<div class="feed-delta">${money(x.previousCaseCost)} &rarr; ${money(parseFloat(x.caseCost))}${
+          typeof x.recommendedPrice === 'number' ? ` &middot; sell ${money(x.recommendedPrice)}` : ''
+        }</div>` : ''}
+        ${x.error ? `<div class="feed-error">${escapeHtml(x.error)}</div>` : ''}
+      </div>
+    </div>`;
+}
+
+function renderExtracted(x) {
+  renderExtractedInto(importExtracted, x);
+}
+
+function renderExtractedInto(el, x) {
+  if (!el) return;
+  if (!x) {
+    el.classList.add('hidden');
+    return;
+  }
+
+  const field = (label, value) => `
+    <div class="extract-row">
+      <span class="extract-label">${label}</span>
+      <span class="extract-value ${value ? '' : 'missing'}">${value ? escapeHtml(String(value)) : 'not found'}</span>
+    </div>`;
+
+  // On a refresh, the headline is what MOVED — that's the whole point of the run.
+  const changedHtml = Array.isArray(x.changed)
+    ? x.changed.length
+      ? `<div class="extract-changed">Changed: ${escapeHtml(
+          x.changed.map((f) => FIELD_LABEL[f] || f).join(', ')
+        )}</div>`
+      : '<div class="extract-nochange">No changes</div>'
+    : '';
+
+  el.innerHTML = `
+    <div class="extract-head">
+      ${x.image ? `<img class="extract-thumb" src="${escapeHtml(x.image)}" alt="">` : '<div class="extract-thumb"></div>'}
+      <div>
+        <div class="extract-name">${escapeHtml(x.name || 'Unnamed')}</div>
+        <span class="result-tag result-${x.outcome}">${KIND_LABEL[x.outcome] || x.outcome}</span>
+      </div>
+    </div>
+    ${changedHtml}
+    ${field('Case cost', x.caseCost ? `$${x.caseCost}` : null)}
+    ${field('Case size', x.caseSize)}
+    ${field('SKU (dedupe key)', x.vendorSku)}
+    ${field('Item #', x.itemNumber)}
+    ${field('Barcode', x.barcode)}
+    ${x.pricePerEach ? field('Unit price', `$${x.pricePerEach}`) : ''}
+    ${x.error ? `<div class="extract-error">${escapeHtml(x.error)}</div>` : ''}
+  `;
+  el.classList.remove('hidden');
+}
+
+function money(n) {
+  return typeof n === 'number' ? `$${n.toFixed(2)}` : '—';
+}
+
+function formatDate(iso) {
+  if (!iso) return 'unknown';
+  const d = new Date(iso);
+  return isNaN(d) ? 'unknown' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// Sales only reach a catalog row through an org product cloned from it, so a row with
+// no clones can never have sales — say "not picked by any org" rather than a bare "0".
+function usageLabel(u) {
+  if (!u || !u.clones) return '<span class="dup-unused">Not picked by any org</span>';
+
+  const orgs = `${u.clones} org product${u.clones === 1 ? '' : 's'}`;
+  const sales = u.unitsSold
+    ? `${u.unitsSold} sold${u.lastSaleAt ? `, last ${formatDate(u.lastSaleAt)}` : ''}`
+    : 'no sales yet';
+  return `<span>${orgs} &middot; ${sales}</span>`;
+}
+
+// Collapsed by default: the counts are the headline, the per-item detail is there
+// when you want to check what actually landed.
+function renderResultsDetails(results) {
+  if (!results || !results.length) return '';
+
+  const rows = results.map((r) => {
+    const unit = typeof r.caseCost === 'number' && r.caseSize
+      ? ` &middot; ${money(r.caseCost / r.caseSize)}/ea`
+      : '';
+    const priceChange = r.kind === 'updated' && typeof r.previousCaseCost === 'number'
+      ? `<div class="result-change">Case cost ${money(r.previousCaseCost)} &rarr; ${money(r.caseCost)}</div>`
+      : '';
+
+    return `
+      <li class="result-item">
+        ${r.image ? `<img class="result-thumb" src="${escapeHtml(r.image)}" alt="">` : '<div class="result-thumb"></div>'}
+        <div class="result-body">
+          <div class="result-name">${escapeHtml(r.name || 'Unnamed')}</div>
+          <div class="result-meta">
+            <span class="result-tag result-${r.kind}">${KIND_LABEL[r.kind] || r.kind}</span>
+            <span>${money(r.caseCost)} / ${r.caseSize || '?'} ct${unit}</span>
+          </div>
+          <div class="result-meta">
+            <span>Sell ${money(r.recommendedPrice)}</span>
+            ${r.vendorSku ? `<span>SKU ${escapeHtml(r.vendorSku)}</span>` : ''}
+            ${r.category ? `<span>${escapeHtml(r.category)}</span>` : ''}
+          </div>
+          ${r.barcode ? `<div class="result-meta"><span>Barcode ${escapeHtml(r.barcode)}</span></div>` : ''}
+          ${priceChange}
+        </div>
+      </li>`;
+  }).join('');
+
+  return `
+    <details class="result-details">
+      <summary>View ${results.length} item${results.length === 1 ? '' : 's'}</summary>
+      <ul class="result-list">${rows}</ul>
+    </details>
+  `;
+}
+
+async function pollImportOnce() {
+  let p = null;
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'GET_IMPORT_PROGRESS' });
+    p = resp && resp.progress;
+  } catch (e) {
+    // Background worker asleep or no job yet — treat as idle.
+  }
+  renderImportProgress(p);
+  await renderSelection();
+
+  const running = !!(p && p.running);
+  if (running && !importPollTimer) {
+    importPollTimer = setInterval(pollImportOnce, 800);
+  } else if (!running && importPollTimer) {
+    clearInterval(importPollTimer);
+    importPollTimer = null;
+  }
+}
+
+importSelectedBtn.addEventListener('click', async () => {
+  importSummary.classList.add('hidden');
+  importSelectedBtn.disabled = true;
+  try {
+    await chrome.runtime.sendMessage({ type: 'START_SELECTED_IMPORT' });
+  } catch (e) {
+    // ignore — poll will reflect state
+  }
+  pollImportOnce();
+});
+
+cancelImportBtn.addEventListener('click', async () => {
+  cancelImportBtn.disabled = true;
+  try {
+    await chrome.runtime.sendMessage({ type: 'CANCEL_SELECTED_IMPORT' });
+  } catch (e) {
+    // ignore
+  }
+});
+
+clearSelectionLink.addEventListener('click', async (e) => {
+  e.preventDefault();
+  await chrome.storage.local.remove(['selection', 'selectedImport']);
+  importState = null;
+  importSummary.classList.add('hidden');
+  renderSelection();
+});
+
+// Reflect checkboxes ticked on the page while the popup is open.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.selection) renderSelection();
 });
 
 // Initialize on load
