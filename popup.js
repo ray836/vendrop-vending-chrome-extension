@@ -2,6 +2,7 @@ const FIELD_LABEL = {
   caseCost: 'price',
   caseSize: 'case size',
   images: 'images',
+  components: 'assortment',
   name: 'name',
   description: 'description',
   barcode: 'barcode',
@@ -32,6 +33,7 @@ const productPreview = document.getElementById('product-preview');
 const previewImg = document.getElementById('preview-img');
 const previewName = document.getElementById('preview-name');
 const previewPrice = document.getElementById('preview-price');
+const assortmentPreview = document.getElementById('assortment-preview');
 
 // UI Elements - Edit Form
 const editRetailerBadge = document.getElementById('edit-retailer-badge');
@@ -291,6 +293,28 @@ function showProductPreview(productData) {
     previewPrice.textContent = `$${productData.case_cost}`;
   }
   productPreview.classList.remove('hidden');
+  assortmentPreview.classList.add('hidden');
+}
+
+function renderAssortmentPreview(product) {
+  if (!product || product.assortmentStatus === 'not_variety') {
+    assortmentPreview.classList.add('hidden');
+    assortmentPreview.innerHTML = '';
+    return;
+  }
+  const components = (product.components || []).filter((component) => component.active !== false);
+  const needsReview = product.assortmentStatus === 'needs_review';
+  assortmentPreview.className = `assortment-preview${needsReview ? ' needs-review' : ''}`;
+  assortmentPreview.innerHTML = `
+    <div class="assortment-head">
+      <span>Variety case</span>
+      <span class="assortment-status">${needsReview ? 'Needs review' : 'Confirmed'}</span>
+    </div>
+    ${components.length ? `<ul class="assortment-list">${components.map((component) => `
+      <li><span>${escapeHtml(component.name)}</span><strong>${component.quantityPerCase ?? '?'}</strong></li>
+    `).join('')}</ul>` : '<p class="panel-hint">No reliable component list was extracted. Review this assortment in the catalog.</p>'}
+  `;
+  assortmentPreview.classList.remove('hidden');
 }
 
 // Populate edit form with product data
@@ -413,6 +437,7 @@ async function saveProduct(productData) {
         region: productData.region || null,
         shelfLifeDays: productData.shelf_life_days ? parseInt(productData.shelf_life_days) : null,
         images: productData.images || [],
+        description: productData.description || null,
       })
     });
 
@@ -479,8 +504,11 @@ addProductBtn.addEventListener('click', async () => {
     const existed = result.data.action === 'exists';
     const msg = existed
       ? `✓ Already in catalog: ${result.data.product.name}`
-      : `✓ Added to catalog: ${result.data.product.name}!`;
+      : result.data.action === 'updated'
+        ? `✓ Refreshed catalog product: ${result.data.product.name}`
+        : `✓ Added to catalog: ${result.data.product.name}!`;
     showStatus(msg, 'success');
+    renderAssortmentPreview(result.data.product);
 
     // Disable buttons after successful save
     setTimeout(() => {
@@ -543,8 +571,11 @@ productForm.addEventListener('submit', async (e) => {
     const existed = result.data.action === 'exists';
     const msg = existed
       ? `✓ Already in catalog: ${result.data.product.name}`
-      : `✓ Added to catalog: ${result.data.product.name}!`;
+      : result.data.action === 'updated'
+        ? `✓ Refreshed catalog product: ${result.data.product.name}`
+        : `✓ Added to catalog: ${result.data.product.name}!`;
     showStatus(msg, 'success', editStatusMessage);
+    renderAssortmentPreview(result.data.product);
 
     // Go back to main view after short delay
     setTimeout(() => {
@@ -1059,12 +1090,23 @@ function renderFeedItem(x) {
           <span>${x.caseSize ? `${escapeHtml(String(x.caseSize))} ct` : '<em>no size</em>'}</span>
           ${x.barcode ? `<span>${escapeHtml(x.barcode)}</span>` : ''}
         </div>
+        ${renderAssortmentInline(x)}
         ${priceMoved ? `<div class="feed-delta">${money(x.previousCaseCost)} &rarr; ${money(parseFloat(x.caseCost))}${
           typeof x.recommendedPrice === 'number' ? ` &middot; sell ${money(x.recommendedPrice)}` : ''
         }</div>` : ''}
         ${x.error ? `<div class="feed-error">${escapeHtml(x.error)}</div>` : ''}
       </div>
     </div>`;
+}
+
+function renderAssortmentInline(value) {
+  if (!value || !value.assortmentStatus || value.assortmentStatus === 'not_variety') return '';
+  const components = (value.components || []).filter((component) => component.active !== false);
+  const total = components.reduce((sum, component) => sum + (Number(component.quantityPerCase) || 0), 0);
+  const label = value.assortmentStatus === 'confirmed'
+    ? `Variety confirmed · ${components.length} components · ${total} total`
+    : `Variety needs review · ${components.length} components`;
+  return `<div class="${value.assortmentStatus === 'confirmed' ? 'extract-changed' : 'extract-error'}">${escapeHtml(label)}</div>`;
 }
 
 function renderExtracted(x) {
@@ -1163,6 +1205,7 @@ function renderResultsDetails(results) {
             ${r.category ? `<span>${escapeHtml(r.category)}</span>` : ''}
           </div>
           ${r.barcode ? `<div class="result-meta"><span>Barcode ${escapeHtml(r.barcode)}</span></div>` : ''}
+          ${renderAssortmentInline(r)}
           ${priceChange}
         </div>
       </li>`;
