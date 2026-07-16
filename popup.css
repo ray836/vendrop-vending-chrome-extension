@@ -237,6 +237,30 @@ header h1 {
   gap: 12px;
 }
 
+.assortment-detail-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #ede9fe;
+  color: #6d28d9;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.assortment-detail-link:hover {
+  color: #5b21b6;
+  text-decoration: underline;
+}
+
+.needs-review .assortment-detail-link {
+  border-top-color: #fde68a;
+  color: #92400e;
+}
+
 .form-group {
   display: flex;
   flex-direction: column;

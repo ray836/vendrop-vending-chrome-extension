@@ -75,8 +75,9 @@ Before installing the extension, ensure you have:
    - Success message appears
 
 6. **Verify in your VenDrop app**
-   - Navigate to your products page
-   - New product should appear in catalog
+   - For variety cases, click **Open product details** in the confirmed assortment card
+   - The app opens the matching product for your signed-in organization
+   - If your organization has not picked the shared catalog item yet, the app directs you to Products instead
 
 ## Supported Retailers
 
