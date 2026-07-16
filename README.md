@@ -159,6 +159,34 @@ If your VenDrop app runs on a different port:
 3. Update "Catalog Maintainer Token" field
 4. Click "Save Settings"
 
+### Variety-case contract
+
+Imports and catalog refreshes send the vendor description and full image gallery to
+`POST /api/catalog`. The app analyzes whether the parent is a variety case and returns:
+
+```json
+{
+  "product": {
+    "assortmentStatus": "confirmed",
+    "components": [
+      {
+        "id": "stdcmp-...",
+        "name": "Ruffles Queso",
+        "aliases": ["Queso Ruffles"],
+        "quantityPerCase": 10,
+        "recognitionImages": [],
+        "active": true
+      }
+    ]
+  }
+}
+```
+
+`confirmed` means all active component quantities sum exactly to `caseSize`.
+Otherwise the API returns `needs_review`; the popup displays the extracted components
+for a maintainer to review. Components remain hidden children of the one catalog
+product. Refresh preserves their IDs and marks missing components inactive.
+
 ## Development
 
 ### File Structure

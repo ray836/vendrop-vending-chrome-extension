@@ -341,6 +341,8 @@ async function recordChange(item, result) {
     previousCaseCost: result.previousCaseCost ?? null,
     caseCost: p.caseCost ?? null,
     recommendedPrice: p.recommendedPrice ?? null,
+    assortmentStatus: p.assortmentStatus || null,
+    components: p.components || [],
   });
   await patchProgress({ changes });
 }
@@ -667,6 +669,8 @@ async function pushFeed(getFn, patchFn, scraped, item, outcome, error, changed, 
     barcode: s.barcode || null,
     previousCaseCost: p.previousCaseCost ?? null,
     recommendedPrice: p.recommendedPrice ?? null,
+    assortmentStatus: p.assortmentStatus || null,
+    components: p.components || [],
   };
 
   const cur = (await getFn()) || {};
@@ -692,6 +696,8 @@ async function recordResult(kind, result, item) {
     barcode: p.barcode || null,
     category: p.category || null,
     previousCaseCost: result.previousCaseCost ?? null,
+    assortmentStatus: p.assortmentStatus || null,
+    components: p.components || [],
   });
   await patchImportProgress({ results });
 }
@@ -727,6 +733,7 @@ async function postProduct(settings, scraped, url) {
       // Whole gallery — the API classifies it and keeps the single-unit shot
       // used to recognize this product in a machine photo.
       images: scraped.images || [],
+      description: scraped.description || null,
     }),
   });
 

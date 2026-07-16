@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VenDrop Product Importer",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "Quick-add products from Sam's Club and Costco to your VenDrop catalog",
   "permissions": [
     "activeTab",
