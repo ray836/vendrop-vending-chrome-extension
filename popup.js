@@ -304,6 +304,7 @@ function renderAssortmentPreview(product) {
   }
   const components = (product.components || []).filter((component) => component.active !== false);
   const needsReview = product.assortmentStatus === 'needs_review';
+  const productDetailUrl = buildProductDetailUrl(product.id);
   assortmentPreview.className = `assortment-preview${needsReview ? ' needs-review' : ''}`;
   assortmentPreview.innerHTML = `
     <div class="assortment-head">
@@ -313,8 +314,27 @@ function renderAssortmentPreview(product) {
     ${components.length ? `<ul class="assortment-list">${components.map((component) => `
       <li><span>${escapeHtml(component.name)}</span><strong>${component.quantityPerCase ?? '?'}</strong></li>
     `).join('')}</ul>` : '<p class="panel-hint">No reliable component list was extracted. Review this assortment in the catalog.</p>'}
+    ${productDetailUrl ? `
+      <a class="assortment-detail-link" href="${escapeHtml(productDetailUrl)}" target="_blank" rel="noopener noreferrer">
+        Open product details
+        <span aria-hidden="true">↗</span>
+      </a>
+    ` : ''}
   `;
   assortmentPreview.classList.remove('hidden');
+}
+
+function buildProductDetailUrl(standardProductId) {
+  if (!standardProductId || !settings?.apiUrl) return null;
+
+  try {
+    return new URL(
+      `/web/products/catalog/${encodeURIComponent(standardProductId)}`,
+      settings.apiUrl
+    ).toString();
+  } catch {
+    return null;
+  }
 }
 
 // Populate edit form with product data
