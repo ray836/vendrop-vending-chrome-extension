@@ -91,6 +91,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true; // async response
   }
 
+  if (request.type === 'START_CART_PLACEMENT') {
+    handleStartCartPlacement(request.payload, sender).then(sendResponse);
+    return true;
+  }
+
+  if (request.type === 'CANCEL_CART_PLACEMENT') {
+    cancelCartPlacement(request.orderId).then(sendResponse);
+    return true;
+  }
+
+  if (request.type === 'GET_CART_PLACEMENT_PROGRESS') {
+    getCartPlacementProgress().then((progress) => sendResponse({ success: true, progress }));
+    return true;
+  }
+
   return false;
 });
 
@@ -155,6 +170,316 @@ function isSupportedUrl(u) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+// ===== Sam's Club order cart placement =====
+// The VenDrop Orders page supplies a short-lived token scoped to one order.
+// This flow opens one foreground product tab, adds the requested case quantity
+// for each line, confirms the handoff, and deliberately stops on the cart page.
+
+let cartPlacementRunning = false;
+let cartPlacementCancelRequested = false;
+
+async function getCartPlacementProgress() {
+  const result = await chrome.storage.local.get('cartPlacement');
+  return result.cartPlacement || null;
+}
+
+async function setCartPlacementProgress(progress) {
+  await chrome.storage.local.set({ cartPlacement: progress });
+}
+
+async function patchCartPlacementProgress(patch) {
+  const current = (await getCartPlacementProgress()) || {};
+  const next = { ...current, ...patch };
+  await setCartPlacementProgress(next);
+  return next;
+}
+
+function normalizeApiBaseUrl(value) {
+  try {
+    const url = new URL(value);
+    const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+    if (url.protocol !== 'https:' && !(local && url.protocol === 'http:')) return null;
+    return url.origin;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function handleStartCartPlacement(payload, sender) {
+  const apiBaseUrl = normalizeApiBaseUrl(payload?.apiBaseUrl);
+  const orderId = String(payload?.orderId || '');
+  const extensionToken = String(payload?.extensionToken || '');
+  const placedAt = String(payload?.placedAt || '');
+  if (!apiBaseUrl || !orderId || !extensionToken || !placedAt) {
+    return { success: false, error: 'Invalid cart placement handoff' };
+  }
+
+  // Only the app page that originated the message may choose the API origin.
+  // The extension host permissions provide the second boundary.
+  try {
+    if (!sender?.tab?.url || new URL(sender.tab.url).origin !== apiBaseUrl) {
+      return { success: false, error: 'Cart placement origin mismatch' };
+    }
+  } catch (e) {
+    return { success: false, error: 'Invalid cart placement origin' };
+  }
+
+  const current = await getCartPlacementProgress();
+  if (cartPlacementRunning || current?.running) {
+    return current?.orderId === orderId
+      ? { success: true, alreadyRunning: true }
+      : { success: false, error: 'Another cart placement is already running' };
+  }
+
+  const job = { orderId, extensionToken, apiBaseUrl, placedAt };
+  // Claim the worker synchronously before touching storage so startup
+  // reconciliation cannot mistake this brand-new run for an interrupted one.
+  cartPlacementRunning = true;
+  cartPlacementCancelRequested = false;
+  try {
+    await setCartPlacementProgress({
+      ...job,
+      running: true,
+      done: false,
+      phase: 'loading-order',
+      processed: 0,
+      total: 0,
+      currentName: '',
+      removedCartItems: 0,
+      error: null,
+      startedAt: Date.now(),
+    });
+  } catch (error) {
+    cartPlacementRunning = false;
+    return { success: false, error: String(error?.message || error) };
+  }
+  runCartPlacement(job)
+    .catch((error) => failCartPlacement(job, error))
+    .finally(() => {
+      cartPlacementRunning = false;
+    });
+  return { success: true, started: true };
+}
+
+async function cancelCartPlacement(orderId) {
+  const current = await getCartPlacementProgress();
+  if (!current?.running || (orderId && current.orderId !== orderId)) {
+    return { success: true, running: false };
+  }
+  cartPlacementCancelRequested = true;
+  await patchCartPlacementProgress({ phase: 'canceling' });
+  return { success: true, canceling: true };
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  let data = null;
+  try {
+    data = await response.json();
+  } catch (e) {
+    throw new Error(`VenDrop returned ${response.status} instead of JSON`);
+  }
+  if (!response.ok || data?.success === false) {
+    const error = new Error(data?.error || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+
+async function runCartPlacement(job) {
+  const authorization = { Authorization: `Bearer ${job.extensionToken}` };
+  const cartData = await fetchJson(
+    `${job.apiBaseUrl}/api/orders/next-cart?orderId=${encodeURIComponent(job.orderId)}`,
+    { headers: authorization }
+  );
+  if (!cartData.order) throw new Error('This order is no longer awaiting cart placement');
+
+  const items = cartData.order.items || [];
+  if (!items.length) throw new Error('The order has no items');
+  for (const item of items) {
+    let vendorHostname = '';
+    try {
+      vendorHostname = new URL(item.vendorLink).hostname.toLowerCase();
+    } catch (e) {
+      // Handled by the validation below.
+    }
+    const isSamsClub = vendorHostname === 'samsclub.com' || vendorHostname.endsWith('.samsclub.com');
+    if (item.vendor !== 'samsclub' || !isSamsClub) {
+      throw new Error(`${item.name || 'An item'} does not have a Sam's Club product link`);
+    }
+    if (!Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 50) {
+      throw new Error(`${item.name || 'An item'} has an unsupported case quantity`);
+    }
+  }
+
+  await patchCartPlacementProgress({ phase: 'opening-cart-to-clear', total: items.length });
+  const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
+  await patchCartPlacementProgress({ workTabId: tab.id });
+
+  await navigateCartTab(tab.id, 'https://www.samsclub.com/cart');
+  await patchCartPlacementProgress({
+    phase: 'clearing-cart',
+    currentName: '',
+    currentQuantity: null,
+  });
+  await showPopup();
+  await sleep(400);
+  const clearResult = await clearSamsCartInTab(tab.id);
+  await patchCartPlacementProgress({
+    phase: 'cart-cleared',
+    removedCartItems: Number(clearResult?.removedLineItems || 0),
+  });
+  await showPopup();
+  await sleep(500);
+  await patchCartPlacementProgress({ phase: 'adding-items' });
+
+  for (let index = 0; index < items.length; index++) {
+    if (cartPlacementCancelRequested) throw new Error('Cart placement was canceled');
+    const item = items[index];
+    await patchCartPlacementProgress({
+      phase: 'opening-product',
+      currentName: item.name,
+      currentIndex: index,
+      currentQuantity: item.quantity,
+    });
+    await navigateCartTab(tab.id, item.vendorLink);
+    await patchCartPlacementProgress({ phase: 'adding-current-item', currentQuantity: 1 });
+    await showPopup();
+    await sleep(400); // make the status visible before the first cart click
+    await addProductInTab(tab.id, { ...item, quantity: 1 });
+    await patchCartPlacementProgress({ phase: 'item-complete', processed: index + 1 });
+    await chrome.action.setBadgeBackgroundColor({ color: '#2563eb' });
+    await chrome.action.setBadgeText({ text: `${index + 1}/${items.length}` });
+  }
+
+  if (cartPlacementCancelRequested) throw new Error('Cart placement was canceled');
+  await patchCartPlacementProgress({
+    phase: 'opening-cart-to-update',
+    currentName: '',
+    currentQuantity: null,
+  });
+  await navigateCartTab(tab.id, 'https://www.samsclub.com/cart');
+  await patchCartPlacementProgress({ phase: 'updating-quantities' });
+  await showPopup();
+  await sleep(400);
+  const quantityResult = await setCartQuantitiesInTab(tab.id, items);
+  await patchCartPlacementProgress({
+    phase: 'quantities-updated',
+    totalCases: Number(quantityResult?.totalCases || 0),
+  });
+  await showPopup();
+  await sleep(500);
+
+  if (cartPlacementCancelRequested) throw new Error('Cart placement was canceled');
+  await patchCartPlacementProgress({ phase: 'confirming', currentName: '' });
+  try {
+    await fetchJson(`${job.apiBaseUrl}/api/orders/${encodeURIComponent(job.orderId)}/confirm-placed`, {
+      method: 'POST',
+      headers: authorization,
+    });
+  } catch (error) {
+    // A service-worker retry can reach an order that its prior run already
+    // confirmed. The endpoint reports that idempotent case as 409.
+    if (error.status !== 409) throw error;
+  }
+
+  await chrome.tabs.update(tab.id, { active: true });
+  await patchCartPlacementProgress({
+    running: false,
+    done: true,
+    phase: 'complete',
+    currentName: '',
+    extensionToken: null,
+    finishedAt: Date.now(),
+  });
+  await chrome.action.setBadgeBackgroundColor({ color: '#16a34a' });
+  await chrome.action.setBadgeText({ text: '✓' });
+  await showPopup();
+}
+
+async function failCartPlacement(job, error) {
+  const message = String(error?.message || error || 'Cart placement failed');
+  console.error('[VenDrop] Cart placement failed:', message);
+  try {
+    await fetch(`${job.apiBaseUrl}/api/orders/${encodeURIComponent(job.orderId)}/cancel-placing`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${job.extensionToken}` },
+    });
+  } catch (cancelError) {
+    console.warn('[VenDrop] Could not return order to draft:', cancelError);
+  }
+  await patchCartPlacementProgress({
+    running: false,
+    done: true,
+    phase: cartPlacementCancelRequested ? 'canceled' : 'failed',
+    error: message,
+    currentName: '',
+    extensionToken: null,
+    finishedAt: Date.now(),
+  });
+  await chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+  await chrome.action.setBadgeText({ text: '!' });
+}
+
+async function navigateCartTab(tabId, url) {
+  const loaded = waitForLoad(tabId, 45000);
+  await chrome.tabs.update(tabId, { url, active: true });
+  await loaded;
+  await sleep(1800);
+}
+
+function addProductInTab(tabId, item) {
+  return new Promise((resolve, reject) => {
+    const attempt = (remaining) => {
+      chrome.tabs.sendMessage(
+        tabId,
+        { type: 'ADD_CURRENT_PRODUCT_TO_CART', quantity: item.quantity, expectedName: item.name },
+        (response) => {
+          if (chrome.runtime.lastError || !response) {
+            if (remaining > 1) return setTimeout(() => attempt(remaining - 1), 1000);
+            return reject(new Error(chrome.runtime.lastError?.message || 'Sam\'s Club page did not respond'));
+          }
+          if (!response.success) return reject(new Error(response.error || `Could not add ${item.name}`));
+          resolve(response);
+        }
+      );
+    };
+    attempt(3);
+  });
+}
+
+function clearSamsCartInTab(tabId) {
+  return new Promise((resolve, reject) => {
+    const attempt = (remaining) => {
+      chrome.tabs.sendMessage(tabId, { type: 'CLEAR_SAMS_CART' }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          if (remaining > 1) return setTimeout(() => attempt(remaining - 1), 1000);
+          return reject(new Error(chrome.runtime.lastError?.message || 'Sam\'s Club cart did not respond'));
+        }
+        if (!response.success) return reject(new Error(response.error || 'Could not clear the Sam\'s Club cart'));
+        resolve(response);
+      });
+    };
+    attempt(3);
+  });
+}
+
+function setCartQuantitiesInTab(tabId, items) {
+  return new Promise((resolve, reject) => {
+    // Do not replay this message: a lost response could happen after some plus
+    // buttons were already clicked. The next explicit run starts by clearing the
+    // cart, which is safer than risking duplicate quantity increments here.
+    chrome.tabs.sendMessage(tabId, { type: 'SET_SAMS_CART_QUANTITIES', items }, (response) => {
+      if (chrome.runtime.lastError || !response) {
+        return reject(new Error(chrome.runtime.lastError?.message || 'Sam\'s Club cart did not respond'));
+      }
+      if (!response.success) return reject(new Error(response.error || 'Could not set the Sam\'s Club cart quantities'));
+      resolve(response);
+    });
+  });
 }
 
 // Only one job's results should be on screen at a time — a leftover "Import complete"
@@ -276,8 +601,11 @@ async function runCatalogUpdate() {
 // vendorSku: legacy rows have no SKU, so a SKU-keyed write would create a second
 // row instead of updating the one we're refreshing.
 async function refreshProduct(settings, item, scraped) {
-  const caseCost = parseFloat(scraped && scraped.case_cost);
-  const caseSize = parseInt(scraped && scraped.case_size);
+  // Unavailable retailer pages often hide their price or pack size. Keep the last
+  // known catalog values in that case so the refresh can still record "unavailable"
+  // (and delivery/sale status) instead of failing before it reaches the API.
+  const caseCost = parseFloat(scraped?.case_cost || item.caseCost);
+  const caseSize = parseInt(scraped?.case_size || item.caseSize);
 
   if (!isFinite(caseCost) || caseCost <= 0) {
     return { ok: false, error: 'Could not read a price from the page', changedFields: [] };
@@ -300,6 +628,9 @@ async function refreshProduct(settings, item, scraped) {
       barcode: scraped.barcode || null,
       vendorLink: scraped.url || item.vendorLink,
       images: scraped.images || [],
+      vendorAvailability: scraped.vendor_availability || 'unknown',
+      vendorOnSale: scraped.vendor_on_sale === true,
+      vendorDeliveryEligible: scraped.vendor_delivery_eligible,
     }),
   });
 
@@ -667,6 +998,9 @@ async function pushFeed(getFn, patchFn, scraped, item, outcome, error, changed, 
     vendorSku: s.vendor_sku || null,
     itemNumber: s.item_number || null,
     barcode: s.barcode || null,
+    vendorAvailability: s.vendor_availability || 'unknown',
+    vendorOnSale: s.vendor_on_sale === true,
+    vendorDeliveryEligible: s.vendor_delivery_eligible,
     previousCaseCost: p.previousCaseCost ?? null,
     recommendedPrice: p.recommendedPrice ?? null,
     assortmentStatus: p.assortmentStatus || null,
@@ -734,6 +1068,9 @@ async function postProduct(settings, scraped, url) {
       // used to recognize this product in a machine photo.
       images: scraped.images || [],
       description: scraped.description || null,
+      vendorAvailability: scraped.vendor_availability || 'unknown',
+      vendorOnSale: scraped.vendor_on_sale === true,
+      vendorDeliveryEligible: scraped.vendor_delivery_eligible,
     }),
   });
 
@@ -775,6 +1112,34 @@ async function postProduct(settings, scraped, url) {
   const imp = await getImportProgress();
   if (imp && imp.running) {
     await patchImportProgress({ running: false, done: true, interrupted: true, currentName: '' });
+  }
+  const cart = await getCartPlacementProgress();
+  if (cart && cart.running && !cartPlacementRunning) {
+    // Never silently replay cart clicks after Chrome kills a service worker;
+    // doing so could duplicate cases already added. Return the order to draft
+    // and leave the partial cart visible for explicit user review.
+    try {
+      if (cart.extensionToken && cart.apiBaseUrl && cart.orderId) {
+        await fetch(`${cart.apiBaseUrl}/api/orders/${encodeURIComponent(cart.orderId)}/cancel-placing`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${cart.extensionToken}` },
+        });
+      }
+    } catch (e) {
+      console.warn('[VenDrop] Could not cancel interrupted cart placement:', e);
+    }
+    await patchCartPlacementProgress({
+      running: false,
+      done: true,
+      interrupted: true,
+      phase: 'failed',
+      error: 'Chrome interrupted cart placement. Review the partial Sam\'s Club cart before trying again.',
+      currentName: '',
+      extensionToken: null,
+      finishedAt: Date.now(),
+    });
+    await chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+    await chrome.action.setBadgeText({ text: '!' });
   }
 })();
 

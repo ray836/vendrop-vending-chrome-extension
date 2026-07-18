@@ -8,9 +8,342 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'GET_PRODUCT_INFO') {
     const productInfo = extractProductInfo();
     sendResponse({ success: true, productInfo });
+    return false;
   }
-  return true; // Keep the message channel open for async response
+  if (request.type === 'ADD_CURRENT_PRODUCT_TO_CART') {
+    addCurrentSamsProductToCart(request.quantity)
+      .then((result) => sendResponse({ success: true, ...result }))
+      .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
+    return true;
+  }
+  if (request.type === 'CLEAR_SAMS_CART') {
+    clearCurrentSamsCart()
+      .then((result) => sendResponse({ success: true, ...result }))
+      .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
+    return true;
+  }
+  if (request.type === 'SET_SAMS_CART_QUANTITIES') {
+    setCurrentSamsCartQuantities(request.items)
+      .then((result) => sendResponse({ success: true, ...result }))
+      .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
+    return true;
+  }
+  return false;
 });
+
+function isVisible(element) {
+  if (!element) return false;
+  const style = window.getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
+  return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+}
+
+function buttonLabel(button) {
+  return [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function cartItemCount() {
+  const candidates = Array.from(document.querySelectorAll('h1, h2, button[aria-label], [aria-label*="cart" i]'));
+  for (const element of candidates) {
+    const label = buttonLabel(element);
+    const patterns = [
+      /\bcart\s*\((\d+)\s+items?\)/i,
+      /\bcart contains\s+(\d+)\s+items?\b/i,
+    ];
+    for (const pattern of patterns) {
+      const match = label.match(pattern);
+      if (match) return Number(match[1]);
+    }
+  }
+  return null;
+}
+
+function findCartRemoveControls(root = document) {
+  return Array.from(root.querySelectorAll('button, a')).filter((control) => {
+    const labels = [control.getAttribute('aria-label'), control.getAttribute('title'), control.textContent]
+      .filter(Boolean)
+      .map((label) => String(label).replace(/\s+/g, ' ').trim());
+    return labels.some((label) => /^remove$/i.test(label)) && isVisible(control) && !control.disabled;
+  });
+}
+
+function findRemoveConfirmation() {
+  const dialogs = Array.from(document.querySelectorAll('[role="dialog"], dialog'))
+    .filter((dialog) => isVisible(dialog));
+  for (const dialog of dialogs) {
+    const controls = findCartRemoveControls(dialog);
+    if (controls.length === 1) return controls[0];
+  }
+  return null;
+}
+
+function cartLooksEmpty() {
+  const count = cartItemCount();
+  if (count === 0) return true;
+  const cartRegion = document.querySelector('main, [role="main"], [aria-label="Cart" i]') || document.body;
+  const text = (cartRegion?.innerText || cartRegion?.textContent || '').replace(/\s+/g, ' ');
+  return /\bcart\s*\(0\s+items?\)|\byour cart is empty\b|\ba full cart is a happy cart\b/i.test(text);
+}
+
+async function waitForCartState(timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const controls = findCartRemoveControls();
+    if (controls.length || cartLooksEmpty()) return controls;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return findCartRemoveControls();
+}
+
+async function waitForRemoval(clickedControl, previousCount, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let confirmationClicked = false;
+  while (Date.now() < deadline) {
+    if (!confirmationClicked) {
+      const confirmation = findRemoveConfirmation();
+      if (confirmation && confirmation !== clickedControl) {
+        confirmation.click();
+        confirmationClicked = true;
+      }
+    }
+
+    const confirmation = findRemoveConfirmation();
+    const remaining = findCartRemoveControls().filter((control) => control !== confirmation);
+    if (!clickedControl.isConnected || remaining.length < previousCount || cartLooksEmpty()) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error('Sam\'s Club did not remove an existing cart item');
+}
+
+async function waitForVerifiedEmpty(timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // Saved-for-later rows can have their own Remove controls. A verified zero
+    // active-cart count is authoritative and must not delete those saved items.
+    if (cartLooksEmpty()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+async function clearCurrentSamsCart() {
+  if (!window.location.hostname.endsWith('samsclub.com') || !window.location.pathname.startsWith('/cart')) {
+    throw new Error('Open the Sam\'s Club cart before clearing it');
+  }
+
+  await waitForCartState();
+  let removedLineItems = 0;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (cartLooksEmpty()) break;
+    const controls = findCartRemoveControls();
+    if (!controls.length) {
+      // Sam's Club re-renders each fulfillment group asynchronously. Check a
+      // second time before declaring the cart empty.
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const settledControls = findCartRemoveControls();
+      if (!settledControls.length) break;
+    }
+
+    const currentControls = findCartRemoveControls();
+    const control = currentControls[0];
+    if (!control) break;
+    const previousCount = currentControls.length;
+    control.click();
+    await waitForRemoval(control, previousCount);
+    removedLineItems += 1;
+  }
+
+  if (!await waitForVerifiedEmpty()) {
+    throw new Error('Could not verify that the Sam\'s Club cart is empty');
+  }
+
+  return { removedLineItems };
+}
+
+function normalizeProductName(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function samsProductId(value) {
+  const text = String(value || '');
+  const pathMatch = text.match(/\/(?:p|ip)\/[^/?#]+\/(\d{6,})/i);
+  if (pathMatch) return pathMatch[1];
+  let decoded = text;
+  try {
+    decoded = decodeURIComponent(text);
+  } catch (error) {
+    // A malformed tracking URL should still fall back to name matching.
+  }
+  const decodedMatch = decoded.match(/\/(?:p|ip)\/[^/?#]+\/(\d{6,})/i);
+  return decodedMatch ? decodedMatch[1] : null;
+}
+
+function findIncreaseQuantityButton(root = document) {
+  const selectors = [
+    'button[data-automation-id="increase-quantity"]',
+    'button[data-automation-id="increment-quantity"]',
+    'button[data-testid="increase-quantity"]',
+    'button[aria-label*="Increase quantity" i]',
+    'button[aria-label*="Increment" i]',
+    'button[aria-label*="Add one" i]',
+  ];
+  for (const selector of selectors) {
+    const button = root.querySelector(selector);
+    if (button && isVisible(button) && !button.disabled) return button;
+  }
+
+  return Array.from(root.querySelectorAll('button')).find((button) => {
+    const labels = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
+      .filter(Boolean)
+      .map((label) => String(label).replace(/\s+/g, ' ').trim());
+    return isVisible(button) && !button.disabled && labels.some((label) => (
+      /\b(increase|increment|add one|quantity plus)\b/i.test(label) || /^\+$/.test(label)
+    ));
+  }) || null;
+}
+
+function findCartRowForItem(item) {
+  const expectedId = samsProductId(item?.vendorLink);
+  const expectedName = normalizeProductName(item?.name);
+  const links = Array.from(document.querySelectorAll('a[href]'));
+  const linkCandidates = links.filter((link) => {
+    const href = link.getAttribute('href') || link.href || '';
+    if (expectedId && samsProductId(href) === expectedId) return true;
+    const linkName = normalizeProductName(link.textContent || link.getAttribute('aria-label'));
+    return expectedName && linkName && (
+      linkName === expectedName || linkName.includes(expectedName) || expectedName.includes(linkName)
+    );
+  });
+  const titleCandidates = Array.from(document.querySelectorAll(
+    '[data-automation-id*="product-title" i], [data-testid*="product-title" i], h3, h4'
+  )).filter((element) => {
+    const title = normalizeProductName(element.textContent || element.getAttribute('aria-label'));
+    return expectedName && title && (
+      title === expectedName || title.includes(expectedName) || expectedName.includes(title)
+    );
+  });
+  const candidates = [...linkCandidates, ...titleCandidates];
+
+  for (const candidate of candidates) {
+    let row = candidate;
+    while (row && row !== document.body) {
+      if (findIncreaseQuantityButton(row)) return row;
+      row = row.parentElement;
+    }
+  }
+  return null;
+}
+
+async function waitForCartItemCount(expected, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (cartItemCount() === expected) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+async function setCurrentSamsCartQuantities(items) {
+  if (!window.location.hostname.endsWith('samsclub.com') || !window.location.pathname.startsWith('/cart')) {
+    throw new Error('Open the Sam\'s Club cart before setting quantities');
+  }
+  if (!Array.isArray(items) || !items.length) throw new Error('No cart quantities were provided');
+
+  const desiredItems = items.map((item) => ({
+    name: String(item?.name || ''),
+    vendorLink: String(item?.vendorLink || ''),
+    quantity: Number(item?.quantity),
+  }));
+  for (const item of desiredItems) {
+    if (!item.name || !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 50) {
+      throw new Error(`Invalid cart quantity for ${item.name || 'a product'}`);
+    }
+  }
+
+  const initialTotal = desiredItems.length;
+  if (!await waitForCartItemCount(initialTotal, 12000)) {
+    throw new Error(`Expected ${initialTotal} products in the clean cart before setting quantities`);
+  }
+
+  let currentTotal = initialTotal;
+  for (const item of desiredItems) {
+    for (let quantity = 1; quantity < item.quantity; quantity++) {
+      const row = findCartRowForItem(item);
+      const increase = row && findIncreaseQuantityButton(row);
+      if (!increase) throw new Error(`Could not find the quantity control for ${item.name}`);
+      increase.click();
+      currentTotal += 1;
+      if (!await waitForCartItemCount(currentTotal)) {
+        throw new Error(`Sam\'s Club did not update the quantity for ${item.name}`);
+      }
+    }
+  }
+
+  const expectedTotal = desiredItems.reduce((total, item) => total + item.quantity, 0);
+  if (cartItemCount() !== expectedTotal) {
+    throw new Error(`Expected ${expectedTotal} total cases in the Sam\'s Club cart`);
+  }
+  return { totalCases: expectedTotal, productCount: desiredItems.length };
+}
+
+function findAddToCartButton() {
+  const direct = document.querySelector('button[data-automation-id="atc"]');
+  if (direct && isVisible(direct) && !direct.disabled) return direct;
+  return Array.from(document.querySelectorAll('button')).find((button) => {
+    const label = buttonLabel(button);
+    return isVisible(button) && !button.disabled && (/^add to cart\b/i.test(label) || /^add\b.*\bto cart\b/i.test(label));
+  }) || null;
+}
+
+async function waitForCartControl(timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const increase = findIncreaseQuantityButton();
+    if (increase) return increase;
+    const add = findAddToCartButton();
+    if (add) return add;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return null;
+}
+
+async function addCurrentSamsProductToCart(quantity) {
+  if (!window.location.hostname.endsWith('samsclub.com')) {
+    throw new Error('This cart flow only supports Sam\'s Club products');
+  }
+  const requested = Number(quantity);
+  if (!Number.isInteger(requested) || requested < 1 || requested > 50) {
+    throw new Error('Invalid case quantity');
+  }
+
+  const addButton = findAddToCartButton();
+  if (!addButton) {
+    const unavailable = /out of stock|not available|sold out/i.test(document.body.innerText);
+    throw new Error(unavailable ? 'This item is unavailable at Sam\'s Club' : 'Could not find the Add to Cart button');
+  }
+
+  addButton.click();
+  for (let added = 1; added < requested; added++) {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const control = await waitForCartControl();
+    if (!control) throw new Error(`Added 1 of ${requested} cases, but could not find the quantity control`);
+    control.click();
+  }
+
+  // Give Sam's cart state time to persist before the work tab navigates away.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  return { quantityAdded: requested };
+}
 
 // Extract product information from the current page
 function extractProductInfo() {
@@ -34,8 +367,67 @@ function extractProductInfo() {
     images: [],
     description: null,
     url_identifier: null,
-    price_per_each: null
+    price_per_each: null,
+    vendor_availability: 'unknown',
+    vendor_on_sale: false,
+    vendor_delivery_eligible: null
   };
+}
+
+function productJsonLdNodes(data) {
+  if (Array.isArray(data)) return data.flatMap(productJsonLdNodes);
+  if (!data || typeof data !== 'object') return [];
+  return [data, ...productJsonLdNodes(data['@graph'] || [])];
+}
+
+function applyStructuredVendorStatus(productInfo, data) {
+  for (const node of productJsonLdNodes(data)) {
+    if (node['@type'] !== 'Product') continue;
+    const offers = Array.isArray(node.offers) ? node.offers : [node.offers].filter(Boolean);
+    for (const offer of offers) {
+      const availability = String(offer.availability || '').toLowerCase();
+      if (availability.includes('instock') || availability.includes('limitedavailability')) {
+        productInfo.vendor_availability = 'in_stock';
+      } else if (availability.includes('outofstock') || availability.includes('soldout') || availability.includes('discontinued')) {
+        productInfo.vendor_availability = 'out_of_stock';
+      }
+
+      const currentPrice = Number(offer.price);
+      const regularPrice = Number(
+        offer.highPrice || offer.listPrice || offer.priceSpecification?.priceBeforeDiscount
+      );
+      if (currentPrice > 0 && regularPrice > currentPrice) productInfo.vendor_on_sale = true;
+      if (offer.shippingDetails) productInfo.vendor_delivery_eligible = true;
+    }
+  }
+}
+
+function applyVisibleVendorStatus(productInfo) {
+  const bodyText = (document.body?.innerText || document.body?.textContent || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (/\b(out of stock|sold out|currently unavailable|item is unavailable)\b/i.test(bodyText)) {
+    productInfo.vendor_availability = 'out_of_stock';
+  } else if (productInfo.vendor_availability === 'unknown' && findAddToCartButton()) {
+    productInfo.vendor_availability = 'in_stock';
+  }
+
+  const saleElement = document.querySelector(
+    'del, s, [data-automation-id*="strike" i], [data-testid*="strike" i], [class*="strikethrough" i], [class*="was-price" i]'
+  );
+  if (
+    saleElement ||
+    /\b(instant savings|member savings|sale price|save \$\s*\d|was \$\s*\d)\b/i.test(bodyText)
+  ) {
+    productInfo.vendor_on_sale = true;
+  }
+
+  if (/\b(not available|unavailable|ineligible) for (delivery|shipping)\b|\b(delivery|shipping) (not available|unavailable)\b/i.test(bodyText)) {
+    productInfo.vendor_delivery_eligible = false;
+  } else if (/\b(eligible for delivery|delivery available|shipping available|shipping included|free shipping|arrives by)\b/i.test(bodyText)) {
+    productInfo.vendor_delivery_eligible = true;
+  }
 }
 
 // Extract Sam's Club product information
@@ -52,7 +444,10 @@ function extractSamsClubProduct() {
     images: [],
     description: null,
     url_identifier: null,
-    price_per_each: null
+    price_per_each: null,
+    vendor_availability: 'unknown',
+    vendor_on_sale: false,
+    vendor_delivery_eligible: null
   };
 
   try {
@@ -68,6 +463,7 @@ function extractSamsClubProduct() {
     scripts.forEach(script => {
       try {
         const data = JSON.parse(script.textContent);
+        applyStructuredVendorStatus(productInfo, data);
         if (data['@type'] === 'Product') {
           productInfo.name = productInfo.name || data.name;
           productInfo.image = productInfo.image || data.image;
@@ -228,6 +624,7 @@ function extractSamsClubProduct() {
 
     productInfo.images = collectGalleryImages(productInfo.image);
     productInfo.description = collectDescription();
+    applyVisibleVendorStatus(productInfo);
 
     console.log('[VenDrop] Extracted Sam\'s Club product:', productInfo);
   } catch (error) {
@@ -338,7 +735,10 @@ function extractCostcoProduct() {
     images: [],
     description: null,
     url_identifier: null,
-    price_per_each: null
+    price_per_each: null,
+    vendor_availability: 'unknown',
+    vendor_on_sale: false,
+    vendor_delivery_eligible: null
   };
 
   try {
@@ -354,6 +754,7 @@ function extractCostcoProduct() {
     scripts.forEach(script => {
       try {
         const data = JSON.parse(script.textContent);
+        applyStructuredVendorStatus(productInfo, data);
         if (data['@type'] === 'Product') {
           productInfo.name = productInfo.name || data.name;
           productInfo.image = productInfo.image || data.image;
@@ -486,6 +887,7 @@ function extractCostcoProduct() {
 
     productInfo.images = collectGalleryImages(productInfo.image);
     productInfo.description = collectDescription();
+    applyVisibleVendorStatus(productInfo);
 
     console.log('[VenDrop] Extracted Costco product:', productInfo);
   } catch (error) {

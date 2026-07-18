@@ -643,6 +643,19 @@ header h1 {
   text-overflow: ellipsis;
 }
 
+.order-current-action {
+  margin: -5px 0 12px;
+  font-size: 12px;
+  color: #667eea;
+  font-weight: 600;
+}
+
+#open-cart-link {
+  margin: 12px 0;
+  text-decoration: none;
+  box-sizing: border-box;
+}
+
 #update-summary {
   margin-top: 14px;
   padding: 12px;

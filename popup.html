@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VenDrop Product Importer</title>
+  <title>VenDrop Catalog &amp; Ordering</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <div class="container">
     <header>
       <h1>VenDrop</h1>
-      <p class="subtitle">Product Importer</p>
+      <p class="subtitle">Catalog &amp; Ordering</p>
       <span id="version-badge" class="version-badge"></span>
     </header>
 
@@ -44,6 +44,25 @@
         </div>
 
         <button id="save-settings-btn" class="btn btn-primary">Save Settings</button>
+      </div>
+
+      <!-- Order automation status (shown on VenDrop or while a cart job runs) -->
+      <div id="order-view" class="view hidden">
+        <div class="info-box">
+          <p><strong id="order-status-title">Sam's Club ordering</strong></p>
+          <p id="order-status-message">Waiting for an order…</p>
+        </div>
+        <div id="order-progress-wrap" class="hidden">
+          <div class="progress-row">
+            <span id="order-progress-count">0 / 0</span>
+          </div>
+          <div class="progress-track"><div id="order-progress-bar" class="progress-fill"></div></div>
+          <p id="order-current-name" class="update-current"></p>
+          <p id="order-current-action" class="order-current-action"></p>
+        </div>
+        <a id="open-cart-link" class="btn btn-primary btn-block hidden" href="https://www.samsclub.com/cart">Open Sam's Club Cart</a>
+        <button id="cancel-order-btn" class="btn btn-secondary hidden">Cancel cart placement</button>
+        <p class="field-hint">The extension adds cases only. Checkout and payment stay manual.</p>
       </div>
 
       <!-- Main View (shown when on supported page) -->

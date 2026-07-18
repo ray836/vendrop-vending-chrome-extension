@@ -8,6 +8,9 @@ const FIELD_LABEL = {
   barcode: 'barcode',
   vendorSku: 'SKU',
   image: 'main image',
+  vendorAvailability: 'availability',
+  vendorOnSale: 'sale status',
+  vendorDeliveryEligible: 'delivery',
 };
 
 // UI Elements - Views
@@ -15,6 +18,17 @@ const settingsView = document.getElementById('settings-view');
 const mainView = document.getElementById('main-view');
 const notSupportedView = document.getElementById('not-supported-view');
 const editFormView = document.getElementById('edit-form-view');
+const orderView = document.getElementById('order-view');
+const orderStatusTitle = document.getElementById('order-status-title');
+const orderStatusMessage = document.getElementById('order-status-message');
+const orderProgressWrap = document.getElementById('order-progress-wrap');
+const orderProgressCount = document.getElementById('order-progress-count');
+const orderProgressBar = document.getElementById('order-progress-bar');
+const orderCurrentName = document.getElementById('order-current-name');
+const orderCurrentAction = document.getElementById('order-current-action');
+const cancelOrderBtn = document.getElementById('cancel-order-btn');
+const openCartLink = document.getElementById('open-cart-link');
+let latestCartPlacement = null;
 
 // UI Elements - Settings
 const catalogTokenInput = document.getElementById('catalog-token-input');
@@ -100,6 +114,17 @@ async function init() {
   // Surfaced so it's obvious at a glance whether the loaded build is current.
   document.getElementById('version-badge').textContent = `v${chrome.runtime.getManifest().version}`;
 
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const currentTab = tabs[0];
+  const cartProgress = await getCartPlacementProgress();
+  const isFinishedCartJobTab = cartProgress?.done && cartProgress?.workTabId === currentTab?.id;
+  if (cartProgress?.running || isFinishedCartJobTab || isVendropOrdersPage(currentTab?.url)) {
+    showView('order');
+    renderCartPlacement(cartProgress);
+    window.setInterval(async () => renderCartPlacement(await getCartPlacementProgress()), 700);
+    return;
+  }
+
   // Load settings
   settings = await loadSettings();
 
@@ -123,9 +148,6 @@ async function init() {
   }
 
   // Get current tab info
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const currentTab = tabs[0];
-
   if (!currentTab?.url) {
     showView('not-supported');
     return;
@@ -184,6 +206,96 @@ async function init() {
   }
 }
 
+function isVendropOrdersPage(url) {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+    const isProduction = parsed.hostname === 'vendash-v.vercel.app';
+    return (isLocal || isProduction) && parsed.pathname.startsWith('/web/orders');
+  } catch (e) {
+    return false;
+  }
+}
+
+function getCartPlacementProgress() {
+  return chrome.runtime.sendMessage({ type: 'GET_CART_PLACEMENT_PROGRESS' })
+    .then((response) => response?.progress || null)
+    .catch(() => null);
+}
+
+function renderCartPlacement(progress) {
+  latestCartPlacement = progress;
+  const phases = {
+    'loading-order': 'Loading order details…',
+    'opening-cart-to-clear': 'Opening your existing Sam\'s Club cart…',
+    'clearing-cart': 'Removing existing cart items…',
+    'cart-cleared': 'Existing cart cleared',
+    'adding-items': 'Adding cases to Sam\'s Club…',
+    'opening-product': 'Opening the next product page…',
+    'adding-current-item': 'Adding this product…',
+    'item-complete': 'Product added to the cart',
+    'opening-cart-to-update': 'Opening the cart to set quantities…',
+    'updating-quantities': 'Setting final case quantities…',
+    'quantities-updated': 'Case quantities updated',
+    confirming: 'Finishing the cart handoff…',
+    'opening-cart': 'Opening your Sam\'s Club cart…',
+    complete: 'Cart ready',
+    canceling: 'Canceling…',
+    canceled: 'Cart placement canceled',
+    failed: 'Cart placement stopped',
+  };
+  orderStatusTitle.textContent = progress?.running ? 'Sam\'s Club cart in progress' : (phases[progress?.phase] || 'Sam\'s Club ordering');
+  orderStatusMessage.textContent = progress?.error || phases[progress?.phase] || 'Click Add to Sam\'s Cart on the Orders page to begin.';
+
+  const total = Number(progress?.total || 0);
+  const processed = Number(progress?.processed || 0);
+  orderProgressWrap.classList.toggle('hidden', total === 0);
+  const currentIndex = Number(progress?.currentIndex || 0);
+  const activeItem = progress?.running && progress?.currentName;
+  orderProgressCount.textContent = progress?.phase === 'clearing-cart'
+    ? 'Preparing a clean cart'
+    : activeItem
+    ? `Item ${Math.min(total, currentIndex + 1)} of ${total}`
+    : `${processed} of ${total} complete`;
+  orderProgressBar.style.width = total ? `${Math.min(100, (processed / total) * 100)}%` : '0%';
+  orderCurrentName.textContent = progress?.currentName || '';
+  const quantity = Number(progress?.currentQuantity || 0);
+  orderCurrentAction.textContent = progress?.phase === 'cart-cleared'
+    ? `${Number(progress?.removedCartItems || 0)} existing cart product${Number(progress?.removedCartItems || 0) === 1 ? '' : 's'} removed`
+    : progress?.phase === 'quantities-updated'
+    ? `${Number(progress?.totalCases || 0)} total case${Number(progress?.totalCases || 0) === 1 ? '' : 's'} ready`
+    : progress?.phase === 'adding-current-item' && quantity
+    ? 'Adding this product…'
+    : (phases[progress?.phase] || '');
+  cancelOrderBtn.classList.toggle('hidden', !progress?.running);
+  cancelOrderBtn.dataset.orderId = progress?.orderId || '';
+  openCartLink.classList.toggle('hidden', progress?.phase !== 'complete');
+}
+
+openCartLink.addEventListener('click', async (event) => {
+  event.preventDefault();
+  const tabId = latestCartPlacement?.workTabId;
+  if (tabId != null) {
+    try {
+      await chrome.tabs.update(tabId, { url: 'https://www.samsclub.com/cart', active: true });
+      window.close();
+      return;
+    } catch (error) {
+      // The work tab may have been closed; fall through and open a new cart tab.
+    }
+  }
+  await chrome.tabs.create({ url: 'https://www.samsclub.com/cart', active: true });
+  window.close();
+});
+
+cancelOrderBtn.addEventListener('click', async () => {
+  const orderId = cancelOrderBtn.dataset.orderId;
+  if (!orderId) return;
+  await chrome.runtime.sendMessage({ type: 'CANCEL_CART_PLACEMENT', orderId });
+  renderCartPlacement(await getCartPlacementProgress());
+});
+
 // Load settings from storage
 async function loadSettings() {
   const result = await chrome.storage.sync.get(['catalogToken', 'apiUrl']);
@@ -241,6 +353,7 @@ function showView(viewName) {
   mainView.classList.add('hidden');
   notSupportedView.classList.add('hidden');
   editFormView.classList.add('hidden');
+  orderView.classList.add('hidden');
 
   switch (viewName) {
     case 'settings':
@@ -258,6 +371,9 @@ function showView(viewName) {
       break;
     case 'edit':
       editFormView.classList.remove('hidden');
+      break;
+    case 'order':
+      orderView.classList.remove('hidden');
       break;
   }
 
@@ -485,6 +601,9 @@ async function saveProduct(productData) {
         shelfLifeDays: productData.shelf_life_days ? parseInt(productData.shelf_life_days) : null,
         images: productData.images || [],
         description: productData.description || null,
+        vendorAvailability: productData.vendor_availability || 'unknown',
+        vendorOnSale: productData.vendor_on_sale === true,
+        vendorDeliveryEligible: productData.vendor_delivery_eligible,
       })
     });
 

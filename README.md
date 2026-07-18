@@ -2,6 +2,12 @@
 
 Quick-add products from Sam's Club and Costco to your VenDrop vending management catalog with a single click.
 
+## Add an order to Sam's Club
+
+On the VenDrop **Orders** page, click **Add to Sam's Cart**. This is a **replace cart** action: after the user confirms the warning, the extension removes all existing Sam's Club cart items and verifies the cart is empty. It then adds one of each ordered product, returns to the cart, sets every product to the requested case quantity, verifies the total case count, and leaves the finished tab on the Sam's Club cart page. If the old cart or final quantities cannot be verified, the run stops and returns the VenDrop order to draft. Checkout and payment always remain manual.
+
+If a product is unavailable, a page cannot be read, or Chrome interrupts the run, the extension stops instead of replaying uncertain cart clicks. Review any partial cart before trying again.
+
 ## Features
 
 - **One-Click Import:** Add products while browsing Sam's Club or Costco
