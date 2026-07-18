@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "VenDrop Product Importer",
-  "version": "1.12.4",
-  "description": "Quick-add products from Sam's Club and Costco to your VenDrop catalog",
+  "name": "VenDrop Catalog & Ordering",
+  "version": "1.14.1",
+  "description": "Import vendor products and add VenDrop orders to your Sam's Club cart",
   "permissions": [
     "activeTab",
     "storage",
@@ -10,6 +10,8 @@
   ],
   "host_permissions": [
     "http://localhost:*/*",
+    "http://127.0.0.1:*/*",
+    "https://vendash-v.vercel.app/*",
     "https://www.samsclub.com/*",
     "https://www.costco.com/*"
   ],
@@ -27,6 +29,15 @@
     "128": "icons/icon128.png"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "https://vendash-v.vercel.app/*"
+      ],
+      "js": ["order-bridge.js"],
+      "run_at": "document_idle"
+    },
     {
       "matches": [
         "https://www.samsclub.com/*",
