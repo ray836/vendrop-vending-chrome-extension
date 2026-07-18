@@ -50,7 +50,7 @@ Before installing the extension, ensure you have:
 
 ## Usage
 
-### Adding a Product
+### Adding Products from Any Sam's Club Page
 
 1. **Start your VenDrop API server:**
    ```bash
@@ -58,21 +58,21 @@ Before installing the extension, ensure you have:
    npm run dev
    ```
 
-2. **Navigate to a product page:**
-   - Sam's Club: https://www.samsclub.com
-   - Costco: https://www.costco.com
+2. **Open any Sam's Club page**
+   - Search results, category pages, the homepage, carousels, and recommendation cards are supported
+   - Product detail pages still support the single-product preview flow
 
-3. **Open a product page you want to add**
-   - Example: https://www.samsclub.com/p/lays-potato-chips/13626865899
+3. **Check the products you want to add**
+   - VenDrop places a checkbox on each product card
+   - The toolbar badge shows how many products are selected
 
 4. **Click the VenDrop extension icon**
-   - A popup will show product preview (name, image, price)
+   - The popup lists the selected products
 
-5. **Click "Add to Catalog"**
-   - Extension sends the URL to your VenDrop API
-   - API scrapes full product details
-   - Product is saved to your database
-   - Success message appears
+5. **Click "Add Selected to Catalog"**
+   - The extension visits each product page to read the full product details
+   - Each product is added or safely matched to its existing catalog entry
+   - Progress and assortment-analysis results appear in the popup
 
 6. **Verify in your VenDrop app**
    - For variety cases, click **Open product details** in the confirmed assortment card
@@ -84,6 +84,7 @@ Before installing the extension, ensure you have:
 ### Sam's Club
 - ✅ Product pages: `samsclub.com/p/...`
 - ✅ Product pages: `samsclub.com/ip/...`
+- ✅ Product cards across search, category, homepage, carousel, and recommendation views
 - Extracts: name, image, price, case size, SKU, barcode
 
 ### Costco
@@ -97,7 +98,7 @@ Before installing the extension, ensure you have:
 **Problem:** Popup displays "This page is not supported"
 
 **Solutions:**
-- Verify you're on a Sam's Club or Costco product page
+- Verify you're on a Sam's Club or Costco page
 - Refresh the page if you just navigated to it
 - Check that the URL includes `samsclub.com` or `costco.com`
 
@@ -234,35 +235,18 @@ After modifying extension files:
 
 ## Known Issues
 
-1. **Placeholder Icons:** Currently using basic purple squares
-   - Replace with branded icons for production
-   - See `icons/ICONS_README.md` for instructions
-
-2. **No Offline Support:** Extension requires internet connection
+1. **No Offline Support:** Extension requires internet connection
    - Failed requests are not queued
 
-3. **No Duplicate Detection:** Extension doesn't check if product already exists
-   - May create duplicate entries if clicked multiple times
-
-4. **Limited Error Recovery:** No automatic retry on failure
+2. **Limited Error Recovery:** No automatic retry on failure
    - Must manually retry if scraping fails
 
 ## Roadmap
 
-### Coming Soon
-- [ ] Branded extension icons
-- [ ] Category selection in popup
-- [ ] Price multiplier configuration
-- [ ] Product duplicate detection
-- [ ] Edit product before saving
-
 ### Future Features
 - [ ] Support for additional retailers
-- [ ] Bulk import mode
 - [ ] Offline queue
 - [ ] Price history tracking
-- [ ] Token-based authentication
-- [ ] Browser action badge for import count
 
 ## API Documentation
 
