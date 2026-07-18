@@ -501,19 +501,27 @@ if (productInfo.name) {
   console.log('[VenDrop] Product detected:', productInfo);
 }
 
-// ===== Multi-select on listing pages =====
-// Draws a checkbox on every product tile of a browse/search grid. Checked tiles
+// ===== Multi-select on Sam's Club product cards =====
+// Draws a checkbox on every product card we can see — search/category results,
+// homepage carousels, recommendations, and cards on product pages. Checked cards
 // are queued in storage; the popup then imports them one at a time by actually
-// visiting each product page (listing tiles don't carry case size or barcode).
+// visiting each product page (cards don't carry case size or barcode).
 
 const SELECTION_KEY = 'selection';
 
-function isSamsListingPage() {
-  const { hostname, pathname } = window.location;
-  if (!hostname.includes('samsclub.com')) return false;
-  // Product pages have their own single-item flow.
-  return !/^\/(ip|p)\//.test(pathname);
+function isSamsClubPage() {
+  return window.location.hostname.includes('samsclub.com');
 }
+
+// Sam's currently puts `link-identifier` on its full-card click target, but that
+// attribute has changed before. The product href is the durable contract. Keep
+// the old selector as a fallback for sponsored redirect links whose real `/ip/`
+// path only appears inside the `rd` query parameter.
+const SAMS_PRODUCT_LINK_SELECTOR = [
+  'a[href*="/ip/"]',
+  'a[href*="/p/"]',
+  'a[link-identifier]',
+].join(',');
 
 // A tile's href is often a Midas ad-tracking redirect for sponsored products,
 // with the real product URL buried in the `rd` param. Prefer that over the href.
@@ -551,6 +559,11 @@ function resolveProductUrl(anchor) {
 function nameFromUrl(url) {
   const m = url.match(/\/(?:ip|p)\/([^/]+)\/\d+/);
   return m ? decodeURIComponent(m[1]).replace(/-/g, ' ') : null;
+}
+
+function productIdFromUrl(url) {
+  const m = url && url.match(/\/(?:ip|p)\/[^/?#]+\/(\d+)/);
+  return m ? m[1] : null;
 }
 
 // Grid tiles and sponsored-banner tiles nest the anchor differently, so find the
@@ -620,9 +633,9 @@ function injectSelectionStyles() {
 }
 
 async function decorateTiles() {
-  if (!isSamsListingPage()) return;
+  if (!isSamsClubPage()) return;
 
-  const anchors = document.querySelectorAll('a[link-identifier]:not([data-vendrop-tile])');
+  const anchors = document.querySelectorAll(SAMS_PRODUCT_LINK_SELECTOR);
   if (!anchors.length) return;
 
   injectSelectionStyles();
@@ -631,28 +644,43 @@ async function decorateTiles() {
   let skipped = 0;
 
   anchors.forEach((anchor) => {
-    const id = anchor.getAttribute('link-identifier');
     const url = resolveProductUrl(anchor);
+    const id = productIdFromUrl(url);
     const mount = findTileMount(anchor);
     if (!id || !url || !mount) {
       skipped++;
       return;
     }
 
+    // A product can have an image link and a title link inside the same card.
+    // Decorate the card once, but allow the same product to appear in a second
+    // carousel or grid elsewhere on the page.
+    const alreadyDecorated = Array.from(mount.children).some((child) =>
+      child.classList?.contains('vendrop-tile-check') && child.dataset.vendropId === id
+    );
+    if (alreadyDecorated) return;
+
     anchor.setAttribute('data-vendrop-tile', id);
 
     // The anchor is an invisible click-capture overlay, so its own text is often
     // empty. The URL slug is a clean, always-present fallback — and it's only a
     // placeholder for the queue list; the real name comes from the product page.
-    const name = anchor.textContent.trim() || nameFromUrl(url) || id;
-    const item = { id, url, name };
+    const name = anchor.textContent.trim() ||
+      mount.querySelector('h2, h3, [data-automation-id*="title"]')?.textContent?.trim() ||
+      nameFromUrl(url) ||
+      id;
+    const image = mount.querySelector('img')?.currentSrc || mount.querySelector('img')?.src || null;
+    const item = { id, url, name, image };
 
     const box = document.createElement('label');
     box.className = 'vendrop-tile-check';
+    box.dataset.vendropId = id;
+    box.title = selection[id] ? `Remove ${name} from VenDrop` : `Add ${name} to VenDrop`;
 
     const input = document.createElement('input');
     input.type = 'checkbox';
     input.checked = !!selection[id];
+    input.setAttribute('aria-label', `Select ${name} for VenDrop`);
     box.classList.toggle('is-checked', input.checked);
 
     // The whole tile is one big navigation target, so every event that could
@@ -669,6 +697,7 @@ async function decorateTiles() {
     input.addEventListener('change', async (e) => {
       e.stopPropagation();
       box.classList.toggle('is-checked', input.checked);
+      box.title = input.checked ? `Remove ${name} from VenDrop` : `Add ${name} to VenDrop`;
       await setSelected(item, input.checked);
     });
 
@@ -685,7 +714,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes[SELECTION_KEY]) return;
   const selection = changes[SELECTION_KEY].newValue || {};
   document.querySelectorAll('.vendrop-tile-check').forEach((box) => {
-    const id = box.parentElement?.querySelector('a[data-vendrop-tile]')?.getAttribute('data-vendrop-tile');
+    const id = box.dataset.vendropId;
     const input = box.querySelector('input');
     if (!id || !input) return;
     input.checked = !!selection[id];
@@ -693,10 +722,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
   });
 });
 
-if (isSamsListingPage()) {
+if (isSamsClubPage()) {
   decorateTiles();
 
-  // Grids paginate, lazy-load, and re-render on SPA navigation, so keep watching.
+  // Grids, carousels, recommendations, and SPA navigation all re-render without
+  // a full page load, so keep watching for newly visible product cards.
   let pending = null;
   const observer = new MutationObserver(() => {
     clearTimeout(pending);

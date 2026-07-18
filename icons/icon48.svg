@@ -1,10 +1,13 @@
-<svg width="48" height="48" xmlns="http://www.w3.org/2000/svg">
+<svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
+    <linearGradient id="brand" x1="2" y1="2" x2="46" y2="46" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#667eea" />
+      <stop offset="1" stop-color="#764ba2" />
     </linearGradient>
   </defs>
-  <rect width="48" height="48" fill="url(#grad)"/>
-  <text x="50%" y="60%" font-size="28" fill="white" text-anchor="middle" font-family="Arial, sans-serif" font-weight="bold">V</text>
+  <rect x="1.5" y="1.5" width="45" height="45" rx="10" fill="url(#brand)" />
+  <rect x="10" y="10" width="12" height="12" rx="3" fill="white" />
+  <rect x="26" y="10" width="12" height="12" rx="3" fill="white" opacity="0.58" />
+  <rect x="10" y="26" width="12" height="12" rx="3" fill="white" opacity="0.58" />
+  <rect x="26" y="26" width="12" height="12" rx="3" fill="white" />
 </svg>
