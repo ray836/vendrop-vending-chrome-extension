@@ -370,6 +370,11 @@ function extractProductInfo() {
     price_per_each: null,
     vendor_availability: 'unknown',
     vendor_on_sale: false,
+    vendor_discount_amount: null,
+    vendor_regular_case_cost: null,
+    vendor_sale_ends_on: null,
+    vendor_shipping_eligible: null,
+    vendor_pickup_eligible: null,
     vendor_delivery_eligible: null
   };
 }
@@ -378,6 +383,63 @@ function productJsonLdNodes(data) {
   if (Array.isArray(data)) return data.flatMap(productJsonLdNodes);
   if (!data || typeof data !== 'object') return [];
   return [data, ...productJsonLdNodes(data['@graph'] || [])];
+}
+
+function parseSaleEndDate(text, referenceDate = new Date()) {
+  const match = String(text || '').match(
+    /\bEnds?\s+([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:,?\s+(\d{4}))?\b/i
+  );
+  if (!match) return null;
+
+  const monthKey = match[1].slice(0, 3).toLowerCase();
+  const months = {
+    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+  };
+  const month = months[monthKey];
+  const day = Number(match[2]);
+  if (month === undefined || !Number.isInteger(day)) return null;
+
+  const hasYear = Boolean(match[3]);
+  let year = hasYear ? Number(match[3]) : referenceDate.getUTCFullYear();
+  let candidate = new Date(Date.UTC(year, month, day));
+  if (
+    candidate.getUTCMonth() !== month ||
+    candidate.getUTCDate() !== day
+  ) return null;
+
+  const today = Date.UTC(
+    referenceDate.getUTCFullYear(),
+    referenceDate.getUTCMonth(),
+    referenceDate.getUTCDate()
+  );
+  if (!hasYear && candidate.getTime() < today) {
+    year += 1;
+    candidate = new Date(Date.UTC(year, month, day));
+  }
+
+  return candidate.toISOString().slice(0, 10);
+}
+
+function parseFulfillmentOptions(text) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  const chooser = normalized.match(
+    /\bShipping\b(.{0,180}?)\bPickup\b(.{0,180}?)\bDelivery\b(.{0,180}?)(?=\b(?:Shipping|Pickup|Delivery|Curbside Pickup|Club Pickup|Add to Cart)\b|$)/i
+  );
+  if (!chooser) {
+    return { shipping: null, pickup: null, delivery: null };
+  }
+
+  const availability = (details) =>
+    /\b(not available|unavailable|not eligible|ineligible)\b/i.test(details)
+      ? false
+      : true;
+
+  return {
+    shipping: availability(chooser[1]),
+    pickup: availability(chooser[2]),
+    delivery: availability(chooser[3]),
+  };
 }
 
 function applyStructuredVendorStatus(productInfo, data) {
@@ -396,8 +458,15 @@ function applyStructuredVendorStatus(productInfo, data) {
       const regularPrice = Number(
         offer.highPrice || offer.listPrice || offer.priceSpecification?.priceBeforeDiscount
       );
-      if (currentPrice > 0 && regularPrice > currentPrice) productInfo.vendor_on_sale = true;
-      if (offer.shippingDetails) productInfo.vendor_delivery_eligible = true;
+      if (currentPrice > 0 && regularPrice > currentPrice) {
+        productInfo.vendor_on_sale = true;
+        productInfo.vendor_discount_amount = Math.round((regularPrice - currentPrice) * 100) / 100;
+        productInfo.vendor_regular_case_cost = Math.round(regularPrice * 100) / 100;
+      }
+      if (typeof offer.priceValidUntil === 'string' && /^\d{4}-\d{2}-\d{2}/.test(offer.priceValidUntil)) {
+        productInfo.vendor_sale_ends_on = offer.priceValidUntil.slice(0, 10);
+      }
+      if (offer.shippingDetails) productInfo.vendor_shipping_eligible = true;
     }
   }
 }
@@ -423,11 +492,46 @@ function applyVisibleVendorStatus(productInfo) {
     productInfo.vendor_on_sale = true;
   }
 
-  if (/\b(not available|unavailable|ineligible) for (delivery|shipping)\b|\b(delivery|shipping) (not available|unavailable)\b/i.test(bodyText)) {
-    productInfo.vendor_delivery_eligible = false;
-  } else if (/\b(eligible for delivery|delivery available|shipping available|shipping included|free shipping|arrives by)\b/i.test(bodyText)) {
-    productInfo.vendor_delivery_eligible = true;
+  const currentCaseCost = Number(productInfo.case_cost);
+  const struckPriceMatch = String(saleElement?.textContent || '').match(
+    /\$\s*(\d+(?:\.\d{1,2})?)/
+  );
+  const visiblePricePair = bodyText.match(
+    /\bNow\s*\$\s*(\d+(?:\.\d{1,2})?)\s+\$\s*(\d+(?:\.\d{1,2})?)/i
+  );
+  const regularCaseCost = Number(struckPriceMatch?.[1] || visiblePricePair?.[2]);
+  if (
+    Number.isFinite(regularCaseCost) &&
+    regularCaseCost > 0 &&
+    (!Number.isFinite(currentCaseCost) || regularCaseCost > currentCaseCost)
+  ) {
+    productInfo.vendor_on_sale = true;
+    productInfo.vendor_regular_case_cost = Math.round(regularCaseCost * 100) / 100;
   }
+
+  // Sam's renders savings as "$6 off" beside the current price. Costco and some
+  // Sam's layouts use "Save $6" instead. Keep the dollar value separate from the
+  // current case cost so the app can show an unambiguous savings badge.
+  const discountMatch = bodyText.match(/\$\s*(\d+(?:\.\d{1,2})?)\s*off\b/i) ||
+    bodyText.match(/\bsave\s*\$\s*(\d+(?:\.\d{1,2})?)/i);
+  if (discountMatch) {
+    const amount = Number(discountMatch[1]);
+    if (Number.isFinite(amount) && amount > 0) {
+      productInfo.vendor_on_sale = true;
+      productInfo.vendor_discount_amount = Math.round(amount * 100) / 100;
+      if (!productInfo.vendor_regular_case_cost && currentCaseCost > 0) {
+        productInfo.vendor_regular_case_cost = Math.round((currentCaseCost + amount) * 100) / 100;
+      }
+    }
+  }
+
+  const visibleSaleEndsOn = parseSaleEndDate(bodyText);
+  if (visibleSaleEndsOn) productInfo.vendor_sale_ends_on = visibleSaleEndsOn;
+
+  const fulfillment = parseFulfillmentOptions(bodyText);
+  if (fulfillment.shipping != null) productInfo.vendor_shipping_eligible = fulfillment.shipping;
+  if (fulfillment.pickup != null) productInfo.vendor_pickup_eligible = fulfillment.pickup;
+  if (fulfillment.delivery != null) productInfo.vendor_delivery_eligible = fulfillment.delivery;
 }
 
 // Extract Sam's Club product information
@@ -447,6 +551,11 @@ function extractSamsClubProduct() {
     price_per_each: null,
     vendor_availability: 'unknown',
     vendor_on_sale: false,
+    vendor_discount_amount: null,
+    vendor_regular_case_cost: null,
+    vendor_sale_ends_on: null,
+    vendor_shipping_eligible: null,
+    vendor_pickup_eligible: null,
     vendor_delivery_eligible: null
   };
 
@@ -738,6 +847,11 @@ function extractCostcoProduct() {
     price_per_each: null,
     vendor_availability: 'unknown',
     vendor_on_sale: false,
+    vendor_discount_amount: null,
+    vendor_regular_case_cost: null,
+    vendor_sale_ends_on: null,
+    vendor_shipping_eligible: null,
+    vendor_pickup_eligible: null,
     vendor_delivery_eligible: null
   };
 

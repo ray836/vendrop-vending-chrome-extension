@@ -10,6 +10,11 @@ const FIELD_LABEL = {
   image: 'main image',
   vendorAvailability: 'availability',
   vendorOnSale: 'sale status',
+  vendorDiscountAmount: 'sale savings',
+  vendorRegularCaseCost: 'regular price',
+  vendorSaleEndsOn: 'sale end date',
+  vendorShippingEligible: 'shipping',
+  vendorPickupEligible: 'pickup',
   vendorDeliveryEligible: 'delivery',
 };
 
@@ -603,6 +608,11 @@ async function saveProduct(productData) {
         description: productData.description || null,
         vendorAvailability: productData.vendor_availability || 'unknown',
         vendorOnSale: productData.vendor_on_sale === true,
+        vendorDiscountAmount: productData.vendor_discount_amount,
+        vendorRegularCaseCost: productData.vendor_regular_case_cost,
+        vendorSaleEndsOn: productData.vendor_sale_ends_on,
+        vendorShippingEligible: productData.vendor_shipping_eligible,
+        vendorPickupEligible: productData.vendor_pickup_eligible,
         vendorDeliveryEligible: productData.vendor_delivery_eligible,
       })
     });
