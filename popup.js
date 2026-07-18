@@ -431,6 +431,33 @@ function setButtonLoading(button, textElement, spinnerElement, loading) {
 // Save product to the shared catalog API.
 // The catalog is app-maintained and global (not org-scoped), so we authenticate
 // with the maintainer token as a Bearer header instead of sending an org ID.
+function isLocalApiUrl(apiUrl) {
+  try {
+    const host = new URL(apiUrl).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch (_) {
+    return false;
+  }
+}
+
+function unreachableApiMessage(apiUrl) {
+  return isLocalApiUrl(apiUrl)
+    ? 'Could not reach the local VenDasher server. Make sure npm run dev is running, then try again.'
+    : `Could not reach the VenDasher API at ${apiUrl}. Check the URL and your connection.`;
+}
+
+async function readCatalogApiResponse(response, apiUrl) {
+  const body = await response.text();
+  try {
+    return JSON.parse(body);
+  } catch (_) {
+    if (isLocalApiUrl(apiUrl) && response.status >= 500) {
+      throw new Error(`The local VenDasher server returned error ${response.status}. Restart npm run dev and try again.`);
+    }
+    throw new Error(`The VenDasher API returned ${response.status} with an invalid response. Try again shortly.`);
+  }
+}
+
 async function saveProduct(productData) {
   if (!settings) return { success: false, error: 'Settings not loaded' };
   if (!settings.catalogToken) {
@@ -461,7 +488,7 @@ async function saveProduct(productData) {
       })
     });
 
-    const data = await response.json();
+    const data = await readCatalogApiResponse(response, settings.apiUrl);
 
     if (response.ok && data.success) {
       return { success: true, data };
@@ -472,7 +499,10 @@ async function saveProduct(productData) {
     }
   } catch (error) {
     console.error('Error saving product:', error);
-    return { success: false, error: error.message };
+    const message = error instanceof TypeError
+      ? unreachableApiMessage(settings.apiUrl)
+      : (error.message || 'Failed to save product');
+    return { success: false, error: message };
   }
 }
 
