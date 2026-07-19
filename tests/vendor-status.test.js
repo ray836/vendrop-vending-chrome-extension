@@ -11,17 +11,29 @@ const helpers = fullSource.slice(
 
 function run() {
   let pageText = 'Instant Savings Now $12.00 $16.00 Save $4.00 Ends Sep 06, 2026 Shipping Arrives Jul 22 Pickup As soon as today Delivery As soon as 1 hour Add to Cart';
+  const body = {
+    get innerText() { return pageText; },
+    get textContent() { return pageText; },
+  };
+  const buyBox = {
+    id: 'fixture-buy-box',
+    tagName: 'DIV',
+    classList: [],
+    parentElement: body,
+    get innerText() { return pageText; },
+    get textContent() { return pageText; },
+    getAttribute() { return null; },
+    querySelector() { return null; },
+  };
   const addButton = {
     disabled: false,
     textContent: 'Add to Cart',
+    parentElement: buyBox,
     getAttribute() { return null; },
     getBoundingClientRect() { return { width: 100, height: 40 }; },
   };
   const document = {
-    body: {
-      get innerText() { return pageText; },
-      get textContent() { return pageText; },
-    },
+    body,
     querySelector(selector) {
       if (selector === 'button[data-automation-id="atc"]') return addButton;
       return null;
@@ -52,7 +64,8 @@ function run() {
     case_cost: 12,
   };
   context.applyVisibleVendorStatus(status);
-  assert.deepEqual({ ...status }, {
+  const { vendor_status_evidence: visibleEvidence, ...visibleStatus } = status;
+  assert.deepEqual(visibleStatus, {
     vendor_availability: 'in_stock',
     vendor_on_sale: true,
     vendor_discount_amount: 4,
@@ -63,8 +76,11 @@ function run() {
     vendor_delivery_eligible: true,
     case_cost: 12,
   });
+  assert.equal(visibleEvidence.scope.strategy, 'add_to_cart_ancestor');
+  assert.equal(visibleEvidence.scope.selector, '#fixture-buy-box');
+  assert.equal(visibleEvidence.fields.sale[0].source, 'visible_buy_box');
 
-  pageText = 'This item is sold out Shipping Not available Pickup As soon as today Delivery As soon as 1 hour Add to Cart';
+  pageText = '$12.00 This item is sold out Shipping Not available Pickup As soon as today Delivery As soon as 1 hour Add to Cart';
   const unavailable = {
     vendor_availability: 'unknown',
     vendor_on_sale: false,
@@ -74,6 +90,7 @@ function run() {
     vendor_shipping_eligible: null,
     vendor_pickup_eligible: null,
     vendor_delivery_eligible: null,
+    case_cost: 12,
   };
   context.applyVisibleVendorStatus(unavailable);
   assert.equal(unavailable.vendor_availability, 'out_of_stock');
@@ -100,7 +117,8 @@ function run() {
       shippingDetails: {},
     },
   });
-  assert.deepEqual({ ...structured }, {
+  const { vendor_status_evidence: structuredEvidence, ...structuredStatus } = structured;
+  assert.deepEqual(structuredStatus, {
     vendor_availability: 'in_stock',
     vendor_on_sale: true,
     vendor_discount_amount: 4,
@@ -110,6 +128,7 @@ function run() {
     vendor_pickup_eligible: null,
     vendor_delivery_eligible: null,
   });
+  assert.equal(structuredEvidence.fields.sale[0].source, 'json_ld');
 
   assert.deepEqual(
     { ...context.parseFulfillmentOptions('Shipping Arrives tomorrow Pickup Not available Delivery Not available Add to Cart') },
