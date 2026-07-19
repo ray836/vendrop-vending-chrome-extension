@@ -46,6 +46,7 @@ const editBtn = document.getElementById('edit-btn');
 const btnText = document.getElementById('btn-text');
 const btnSpinner = document.getElementById('btn-spinner');
 const statusMessage = document.getElementById('status-message');
+const analysisIndicator = document.getElementById('analysis-indicator');
 const retailerBadge = document.getElementById('retailer-badge');
 const pageStatus = document.getElementById('page-status');
 const productPreview = document.getElementById('product-preview');
@@ -415,6 +416,41 @@ function showProductPreview(productData) {
   }
   productPreview.classList.remove('hidden');
   assortmentPreview.classList.add('hidden');
+  analysisIndicator.classList.add('hidden');
+}
+
+function analysisLabel(analysis) {
+  if (!analysis) return null;
+  if (analysis.aiUsed && analysis.succeeded === false) {
+    return { text: 'AI incomplete · will retry', kind: 'incomplete' };
+  }
+  if (!analysis.aiUsed) {
+    return { text: 'No AI · analysis unchanged', kind: 'reused' };
+  }
+  const scope = analysis.scope === 'data'
+    ? 'data only'
+    : analysis.scope === 'images'
+      ? 'images'
+      : 'images + data';
+  return { text: `AI used · ${scope}`, kind: 'used' };
+}
+
+function renderAnalysisIndicator(analysis) {
+  const label = analysisLabel(analysis);
+  if (!label) {
+    analysisIndicator.classList.add('hidden');
+    analysisIndicator.textContent = '';
+    return;
+  }
+  analysisIndicator.textContent = label.text;
+  analysisIndicator.className = `analysis-indicator analysis-${label.kind}`;
+}
+
+function renderAnalysisBadge(analysis) {
+  const label = analysisLabel(analysis);
+  return label
+    ? `<span class="analysis-badge analysis-${label.kind}">${escapeHtml(label.text)}</span>`
+    : '';
 }
 
 function renderAssortmentPreview(product) {
@@ -425,7 +461,7 @@ function renderAssortmentPreview(product) {
   }
   const components = (product.components || []).filter((component) => component.active !== false);
   const needsReview = product.assortmentStatus === 'needs_review';
-  const productDetailUrl = buildProductDetailUrl(product.id);
+  const productDetailUrl = buildProductDetailUrl(product.id, needsReview);
   assortmentPreview.className = `assortment-preview${needsReview ? ' needs-review' : ''}`;
   assortmentPreview.innerHTML = `
     <div class="assortment-head">
@@ -437,7 +473,7 @@ function renderAssortmentPreview(product) {
     `).join('')}</ul>` : '<p class="panel-hint">No reliable component list was extracted. Review this assortment in the catalog.</p>'}
     ${productDetailUrl ? `
       <a class="assortment-detail-link" href="${escapeHtml(productDetailUrl)}" target="_blank" rel="noopener noreferrer">
-        Open product details
+        ${needsReview ? 'Review assortment' : 'Open product details'}
         <span aria-hidden="true">↗</span>
       </a>
     ` : ''}
@@ -445,14 +481,16 @@ function renderAssortmentPreview(product) {
   assortmentPreview.classList.remove('hidden');
 }
 
-function buildProductDetailUrl(standardProductId) {
+function buildProductDetailUrl(standardProductId, reviewAssortment = false) {
   if (!standardProductId || !settings?.apiUrl) return null;
 
   try {
-    return new URL(
+    const url = new URL(
       `/web/products/catalog/${encodeURIComponent(standardProductId)}`,
       settings.apiUrl
-    ).toString();
+    );
+    if (reviewAssortment) url.searchParams.set('review', 'assortment');
+    return url.toString();
   } catch {
     return null;
   }
@@ -687,6 +725,7 @@ addProductBtn.addEventListener('click', async () => {
         ? `✓ Refreshed catalog product: ${result.data.product.name}`
         : `✓ Added to catalog: ${result.data.product.name}!`;
     showStatus(msg, 'success');
+    renderAnalysisIndicator(result.data.analysis);
     renderAssortmentPreview(result.data.product);
 
     // Disable buttons after successful save
@@ -754,6 +793,7 @@ productForm.addEventListener('submit', async (e) => {
         ? `✓ Refreshed catalog product: ${result.data.product.name}`
         : `✓ Added to catalog: ${result.data.product.name}!`;
     showStatus(msg, 'success', editStatusMessage);
+    renderAnalysisIndicator(result.data.analysis);
     renderAssortmentPreview(result.data.product);
 
     // Go back to main view after short delay
@@ -858,8 +898,14 @@ function renderSummary(p) {
     <div class="summary-title">${title}</div>
     <div class="summary-row summary-updated"><span>Updated</span><span class="val">${p.updated || 0}</span></div>
     <div class="summary-row"><span>Unchanged</span><span class="val">${p.unchanged || 0}</span></div>
+    <div class="summary-row summary-ai"><span>AI used</span><span class="val">${p.aiUsed || 0}</span></div>
+    <div class="summary-row summary-reused"><span>No AI (analysis same)</span><span class="val">${p.aiReused || 0}</span></div>
+    ${p.aiIncomplete ? `<div class="summary-row summary-failed"><span>AI incomplete</span><span class="val">${p.aiIncomplete}</span></div>` : ''}
     <div class="summary-row"><span>Skipped (no vendor link)</span><span class="val">${p.skipped || 0}</span></div>
     <div class="summary-row summary-failed"><span>Failed</span><span class="val">${p.failed || 0}</span></div>
+    ${renderNeedsReviewSummary(p.feed)}
+    ${renderAiUsageSummary(p)}
+    ${renderAiFailures(p.aiFailures)}
     ${renderChanges(p.changes)}
     ${renderMerged(p.merged)}
     ${errorsHtml}
@@ -1071,6 +1117,8 @@ let importIsRunning = false;
 
 function syncJobChrome() {
   document.body.classList.toggle('job-running', refreshIsRunning || importIsRunning);
+  document.body.classList.toggle('refresh-running', refreshIsRunning);
+  document.body.classList.toggle('import-running', importIsRunning);
 }
 
 async function isImportRunning() {
@@ -1140,6 +1188,7 @@ function renderImportProgress(p) {
   }
 
   if (p.running) {
+    showJobRunning('Adding selected products…');
     importSelectedBtn.classList.add('hidden');
     importSummary.classList.add('hidden');
     importProgress.classList.remove('hidden');
@@ -1186,7 +1235,13 @@ function renderImportSummary(p) {
     <div class="summary-row summary-added"><span>Added</span><span class="val">${p.added || 0}</span></div>
     <div class="summary-row summary-updated"><span>Updated (price changed)</span><span class="val">${p.updated || 0}</span></div>
     <div class="summary-row"><span>Unchanged</span><span class="val">${p.existed || 0}</span></div>
+    <div class="summary-row summary-ai"><span>AI used</span><span class="val">${p.aiUsed || 0}</span></div>
+    <div class="summary-row summary-reused"><span>No AI (analysis same)</span><span class="val">${p.aiReused || 0}</span></div>
+    ${p.aiIncomplete ? `<div class="summary-row summary-failed"><span>AI incomplete</span><span class="val">${p.aiIncomplete}</span></div>` : ''}
     <div class="summary-row summary-failed"><span>Failed</span><span class="val">${p.failed || 0}</span></div>
+    ${renderNeedsReviewSummary(p.results)}
+    ${renderAiUsageSummary(p)}
+    ${renderAiFailures(p.aiFailures)}
     ${renderResultsDetails(p.results)}
     ${errorsHtml}
   `;
@@ -1263,6 +1318,7 @@ function renderFeedItem(x) {
         <div class="feed-meta">
           <span class="result-tag result-${x.outcome}">${KIND_LABEL[x.outcome] || x.outcome}</span>
           ${changed}
+          ${renderAnalysisBadge(x.analysis)}
         </div>
         <div class="feed-meta feed-facts">
           <span>${x.caseCost ? `$${escapeHtml(String(x.caseCost))}` : '<em>no price</em>'}</span>
@@ -1285,7 +1341,35 @@ function renderAssortmentInline(value) {
   const label = value.assortmentStatus === 'confirmed'
     ? `Variety confirmed · ${components.length} components · ${total} total`
     : `Variety needs review · ${components.length} components`;
-  return `<div class="${value.assortmentStatus === 'confirmed' ? 'extract-changed' : 'extract-error'}">${escapeHtml(label)}</div>`;
+  const reviewUrl = value.assortmentStatus === 'needs_review'
+    ? buildProductDetailUrl(value.standardProductId, true)
+    : null;
+  return `<div class="${value.assortmentStatus === 'confirmed' ? 'extract-changed' : 'extract-error'} assortment-inline">
+    <span>${escapeHtml(label)}</span>
+    ${reviewUrl ? `<a class="feed-review-link" href="${escapeHtml(reviewUrl)}" target="_blank" rel="noopener noreferrer">Review ↗</a>` : ''}
+  </div>`;
+}
+
+function renderNeedsReviewSummary(items) {
+  const seen = new Set();
+  const reviews = (items || []).filter((item) => {
+    if (!item || item.assortmentStatus !== 'needs_review' || !item.standardProductId) return false;
+    if (seen.has(item.standardProductId)) return false;
+    seen.add(item.standardProductId);
+    return true;
+  });
+  if (!reviews.length) return '';
+
+  return `
+    <div class="summary-review-block">
+      <div class="summary-row summary-failed"><span>Needs assortment review</span><span class="val">${reviews.length}</span></div>
+      <div class="summary-review-links">
+        ${reviews.map((item) => {
+          const url = buildProductDetailUrl(item.standardProductId, true);
+          return url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.name || 'Review product')} <span aria-hidden="true">↗</span></a>` : '';
+        }).join('')}
+      </div>
+    </div>`;
 }
 
 function renderExtracted(x) {
@@ -1338,6 +1422,113 @@ function money(n) {
   return typeof n === 'number' ? `$${n.toFixed(2)}` : '—';
 }
 
+function aiMoney(n) {
+  if (typeof n !== 'number' || !isFinite(n)) return '—';
+  return `$${n.toFixed(n < 1 ? 4 : 2)}`;
+}
+
+function formatDuration(ms) {
+  if (typeof ms !== 'number' || !isFinite(ms) || ms < 0) return '—';
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${remainder}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function formatTokens(tokens) {
+  const count = Number(tokens) || 0;
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}m`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
+  return String(count);
+}
+
+function providerLabel(provider) {
+  return ({ gemini: 'Gemini', openai: 'OpenAI', anthropic: 'Anthropic', xai: 'xAI' })[provider] || provider;
+}
+
+function modelLabel(model) {
+  return ({
+    'gemini-3.1-pro-preview': 'Gemini 3.1 Pro',
+    'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite',
+  })[model] || model;
+}
+
+function renderAiUsageSummary(p) {
+  const finishedAt = typeof p.finishedAt === 'number' ? p.finishedAt : Date.now();
+  const elapsedMs = typeof p.startedAt === 'number' ? Math.max(0, finishedAt - p.startedAt) : null;
+  const providers = Object.values(p.aiProviderUsage || {})
+    .filter((provider) => provider && provider.calls)
+    .sort((a, b) => b.calls - a.calls);
+  const durationLabel = Array.isArray(p.results) ? 'Total import time' : 'Total refresh time';
+  const disabledProviders = (p.disabledAiProviders || []).map(providerLabel);
+  const disabledModels = (p.disabledAiModels || []).map(modelLabel);
+
+  const providerHtml = providers.length
+    ? `<div class="ai-provider-list">
+        <div class="ai-provider-title">Provider usage</div>
+        ${providers.map((provider) => {
+          const totalTokens = (provider.inputTokens || 0) +
+            (provider.outputTokens || 0) +
+            (provider.reasoningTokens || 0);
+          return `<div class="ai-provider-row">
+            <div class="ai-provider-head">
+              <strong>${escapeHtml(providerLabel(provider.provider))}</strong>
+              <span>${provider.calls} call${provider.calls === 1 ? '' : 's'} · ${aiMoney(provider.estimatedCostUsd || 0)}</span>
+            </div>
+            <div class="ai-provider-meta">${formatTokens(totalTokens)} tokens · ${formatDuration(provider.durationMs || 0)} model time</div>
+          </div>`;
+        }).join('')}
+      </div>`
+    : '<div class="summary-note">No paid model calls were needed.</div>';
+
+  return `
+    <div class="summary-usage">
+      <div class="summary-row summary-time"><span>${durationLabel}</span><span class="val">${formatDuration(elapsedMs)}</span></div>
+      <div class="summary-row summary-spend"><span>Estimated AI spend</span><span class="val">${aiMoney(p.aiEstimatedCostUsd || 0)}</span></div>
+      <div class="summary-row"><span>AI model calls</span><span class="val">${p.aiCalls || 0}</span></div>
+      <div class="summary-row"><span>Cumulative AI time</span><span class="val">${formatDuration(p.aiDurationMs || 0)}</span></div>
+      ${disabledProviders.length ? `<div class="summary-row summary-failed"><span>Quota fallback activated</span><span class="val">${escapeHtml(disabledProviders.join(', '))}</span></div>` : ''}
+      ${disabledModels.length ? `<div class="summary-row summary-failed"><span>Models skipped after quota</span><span class="val">${escapeHtml(disabledModels.join(', '))}</span></div>` : ''}
+      ${providerHtml}
+      <div class="summary-note">Spend is estimated from token usage and configured model rates. Cumulative AI time includes parallel and fallback calls.</div>
+    </div>`;
+}
+
+function analysisFeatureLabel(feature) {
+  return ({
+    catalog_image_classification: 'Image classification',
+    catalog_variety_analysis: 'Variety analysis',
+    catalog_health_classification: 'Health classification',
+  })[feature] || 'Catalog analysis';
+}
+
+function renderAiFailures(failures) {
+  if (!Array.isArray(failures) || failures.length === 0) return '';
+
+  const rows = failures.map((failure) => `
+    <div class="ai-failure-row">
+      <div class="ai-failure-head">
+        <strong>${escapeHtml(failure.name || 'Unnamed product')}</strong>
+        <span class="ai-provider-chip">${escapeHtml(providerLabel(failure.provider))}</span>
+      </div>
+      <div class="ai-failure-meta">
+        ${escapeHtml(analysisFeatureLabel(failure.feature))} ·
+        ${failure.kind === 'unusable_response' ? 'Unusable response' : 'Provider error'}
+      </div>
+      ${failure.model ? `<div class="ai-failure-model">${escapeHtml(failure.model)}</div>` : ''}
+      <div class="ai-failure-reason">${escapeHtml(failure.reason || 'Unknown provider failure')}</div>
+    </div>`).join('');
+
+  return `
+    <details class="ai-failure-details">
+      <summary>Model attempts that failed (${failures.length})</summary>
+      <div class="ai-failure-list">${rows}</div>
+    </details>`;
+}
+
 function formatDate(iso) {
   if (!iso) return 'unknown';
   const d = new Date(iso);
@@ -1368,14 +1559,25 @@ function renderResultsDetails(results) {
     const priceChange = r.kind === 'updated' && typeof r.previousCaseCost === 'number'
       ? `<div class="result-change">Case cost ${money(r.previousCaseCost)} &rarr; ${money(r.caseCost)}</div>`
       : '';
+    const detailUrl = buildProductDetailUrl(r.standardProductId);
+    const detailAttrs = detailUrl
+      ? `href="${escapeHtml(detailUrl)}" target="_blank" rel="noopener noreferrer"`
+      : '';
 
     return `
       <li class="result-item">
-        ${r.image ? `<img class="result-thumb" src="${escapeHtml(r.image)}" alt="">` : '<div class="result-thumb"></div>'}
+        ${r.image
+          ? detailUrl
+            ? `<a class="result-thumb-link" ${detailAttrs} aria-label="Open ${escapeHtml(r.name || 'product')} details"><img class="result-thumb" src="${escapeHtml(r.image)}" alt=""></a>`
+            : `<img class="result-thumb" src="${escapeHtml(r.image)}" alt="">`
+          : '<div class="result-thumb"></div>'}
         <div class="result-body">
-          <div class="result-name">${escapeHtml(r.name || 'Unnamed')}</div>
+          ${detailUrl
+            ? `<a class="result-name result-name-link" ${detailAttrs}>${escapeHtml(r.name || 'Unnamed')} <span aria-hidden="true">↗</span></a>`
+            : `<div class="result-name">${escapeHtml(r.name || 'Unnamed')}</div>`}
           <div class="result-meta">
             <span class="result-tag result-${r.kind}">${KIND_LABEL[r.kind] || r.kind}</span>
+            ${renderAnalysisBadge(r.analysis)}
             <span>${money(r.caseCost)} / ${r.caseSize || '?'} ct${unit}</span>
           </div>
           <div class="result-meta">

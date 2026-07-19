@@ -192,8 +192,26 @@ Imports and catalog refreshes send the vendor description and full image gallery
 
 `confirmed` means all active component quantities sum exactly to `caseSize`.
 Otherwise the API returns `needs_review`; the popup displays the extracted components
-for a maintainer to review. Components remain hidden children of the one catalog
-product. Refresh preserves their IDs and marks missing components inactive.
+and links directly to the app-owner review dialog. That dialog edits the sellable case
+size and per-component package quantities, requires the totals to balance, and then
+marks the assortment confirmed. Components remain hidden children of the one catalog
+product. Refresh preserves their IDs and marks missing components inactive. When a
+retailer title contains both an inner piece count and an outer pack count (for example,
+`15 pc., 18 pk.`), the outer package count is used as the catalog case size.
+
+The API also returns the source-fingerprint decision for every import or refresh.
+The popup shows `No AI · analysis unchanged` when existing analysis was reused,
+or an `AI used` badge identifying data-only versus image analysis. Bulk job summaries
+total both outcomes so the savings are visible after a catalog refresh. Completed
+summaries also show elapsed job time, estimated AI spend, model-call count, cumulative
+AI time, and a per-provider calls/tokens/cost breakdown. Failed responses that trigger
+a paid fallback are included in these totals.
+If any provider attempt fails validation or returns an API error, the completed
+summary includes a collapsible list with the product, provider, analysis step, and
+reason—even when another provider recovered and the product itself refreshed.
+Daily Gemini quotas open a model-specific circuit for the rest of that bulk job:
+later products skip the exhausted model immediately while other Gemini models and
+fallback providers remain available. The summary names any model skipped this way.
 
 ## Development
 
@@ -229,6 +247,11 @@ vending-chrome-extention/
 - Visit `chrome://extensions/`
 - Click "Service worker" link under VenDrop
 - View background.js logs
+
+**Product Diagnostic History:**
+- App owners can open **Catalog Source → Import diagnostics** on a product.
+- Recent imports and refreshes retain the matched vendor-status evidence, AI
+  decisions, and component crop rejection reasons for that catalog row.
 
 ### Making Changes
 
@@ -307,7 +330,8 @@ Keep the shared catalog current in one click:
    re-reads its case cost, and updates the catalog when the price changed
    (recommended price is recomputed keeping the same markup). A progress bar shows
    `done/total`; **Cancel** stops it.
-4. When finished you get a summary: Updated / Unchanged / Skipped / Failed.
+4. When finished you get a summary including Updated / Unchanged / Skipped / Failed
+   plus AI used / No AI (analysis same).
 
 The sweep runs in the background service worker, so it keeps going even if you
 close the popup — reopen it to see live progress. Requires the `tabs` permission.

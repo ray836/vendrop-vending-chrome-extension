@@ -80,6 +80,38 @@ Response:
   //             preserving the row's existing markup ratio (same rule as PATCH)
   // "exists"  = the row existed and nothing changed
   previousCaseCost?: number;      // present when the row already existed
+  analysis: {
+    aiUsed: boolean;              // false when both source fingerprints matched
+    scope: "none" | "data" | "images" | "images_and_data";
+    reason: "fingerprints_matched" | "new_product" | "data_changed" |
+            "images_changed" | "images_and_data_changed";
+    succeeded: boolean;           // false means AI was attempted but will retry later
+    usage: {
+      calls: number;
+      inputTokens: number;
+      outputTokens: number;
+      reasoningTokens: number;
+      estimatedCostUsd: number;
+      durationMs: number;          // cumulative model time, not request wall time
+      providers: Array<{
+        provider: "gemini" | "openai" | "anthropic" | "xai";
+        calls: number;
+        inputTokens: number;
+        outputTokens: number;
+        reasoningTokens: number;
+        estimatedCostUsd: number;
+        durationMs: number;
+      }>;
+    };
+    failures: Array<{
+      feature: "catalog_image_classification" | "catalog_variety_analysis" |
+               "catalog_health_classification";
+      provider: "gemini" | "openai" | "anthropic" | "xai";
+      model: string;
+      kind: "unusable_response" | "provider_error";
+      reason: string;
+    }>;
+  };
   product: {
     id: string;
     name: string;
@@ -350,7 +382,15 @@ price-only endpoint still exists but the refresh job no longer uses it.)
    item's existing markup ratio**, so an owner's hand-tuned sell price survives a
    cost change. Fields the scrape couldn't read are left alone — a failed scrape
    must never null out good data.
-5. Afterwards it calls `GET /api/catalog?duplicates=1` and shows any groups.
+5. The API also returns `analysis`, the actual two-fingerprint AI decision. The
+   extension shows it per item and totals AI-used versus analysis-reused results.
+   Its usage block includes every paid attempt (including invalid responses before
+   fallback), allowing the finished summary to report estimated spend, calls, tokens,
+   provider mix, model time, and overall refresh wall time. Recoverable provider
+   failures are attached to their product and listed in the completed summary.
+   A daily-quota failure disables only that model for the rest of the job; the
+   extension passes the disabled-model list into each later catalog request.
+6. Afterwards it calls `GET /api/catalog?duplicates=1` and shows any groups.
 
 > ⚠️ **Refresh targets rows by `id`, never by `vendorSku`.** Legacy seed rows have
 > no `vendorSku`, so a SKU-keyed write would miss them and *create a second row*

@@ -164,6 +164,71 @@ async function bump(kind, item, errMsg) {
   await patchProgress(patch);
 }
 
+// Count the server's actual fingerprint decision. Product fields are not a safe
+// proxy: AI can refresh internal metadata while every public field stays identical.
+async function bumpAnalysis(getFn, patchFn, analysis, item) {
+  if (!analysis) return;
+  const cur = (await getFn()) || {};
+  const patch = analysis.aiUsed
+    ? { aiUsed: (cur.aiUsed || 0) + 1 }
+    : { aiReused: (cur.aiReused || 0) + 1 };
+  if (analysis.aiUsed && analysis.succeeded === false) {
+    patch.aiIncomplete = (cur.aiIncomplete || 0) + 1;
+  }
+
+  const usage = analysis.usage || {};
+  patch.aiCalls = (cur.aiCalls || 0) + (usage.calls || 0);
+  patch.aiInputTokens = (cur.aiInputTokens || 0) + (usage.inputTokens || 0);
+  patch.aiOutputTokens = (cur.aiOutputTokens || 0) + (usage.outputTokens || 0);
+  patch.aiReasoningTokens = (cur.aiReasoningTokens || 0) + (usage.reasoningTokens || 0);
+  patch.aiEstimatedCostUsd = (cur.aiEstimatedCostUsd || 0) + (usage.estimatedCostUsd || 0);
+  patch.aiDurationMs = (cur.aiDurationMs || 0) + (usage.durationMs || 0);
+
+  const providerUsage = { ...(cur.aiProviderUsage || {}) };
+  for (const provider of usage.providers || []) {
+    const previous = providerUsage[provider.provider] || {};
+    providerUsage[provider.provider] = {
+      provider: provider.provider,
+      calls: (previous.calls || 0) + (provider.calls || 0),
+      inputTokens: (previous.inputTokens || 0) + (provider.inputTokens || 0),
+      outputTokens: (previous.outputTokens || 0) + (provider.outputTokens || 0),
+      reasoningTokens: (previous.reasoningTokens || 0) + (provider.reasoningTokens || 0),
+      estimatedCostUsd: (previous.estimatedCostUsd || 0) + (provider.estimatedCostUsd || 0),
+      durationMs: (previous.durationMs || 0) + (provider.durationMs || 0),
+    };
+  }
+  patch.aiProviderUsage = providerUsage;
+
+  if (Array.isArray(analysis.disabledProviders) && analysis.disabledProviders.length) {
+    patch.disabledAiProviders = [...new Set([
+      ...(cur.disabledAiProviders || []),
+      ...analysis.disabledProviders,
+    ])];
+  }
+  if (Array.isArray(analysis.disabledModels) && analysis.disabledModels.length) {
+    patch.disabledAiModels = [...new Set([
+      ...(cur.disabledAiModels || []),
+      ...analysis.disabledModels,
+    ])];
+  }
+
+  if (Array.isArray(analysis.failures) && analysis.failures.length) {
+    const failures = (cur.aiFailures || []).slice(-199);
+    for (const failure of analysis.failures) {
+      failures.push({
+        name: item?.name || 'Unnamed product',
+        provider: failure.provider || 'unknown',
+        model: failure.model || null,
+        feature: failure.feature || 'catalog_analysis',
+        kind: failure.kind || 'provider_error',
+        reason: failure.reason || 'Unknown provider failure',
+      });
+    }
+    patch.aiFailures = failures.slice(-200);
+  }
+  await patchFn(patch);
+}
+
 function isSupportedUrl(u) {
   return typeof u === 'string' && (u.includes('samsclub.com') || u.includes('costco.com'));
 }
@@ -514,6 +579,11 @@ async function runCatalogUpdate() {
   await setProgress({
     running: true, done: false, canceling: false, phase: 'loading',
     total: 0, processed: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0,
+    aiUsed: 0, aiReused: 0, aiIncomplete: 0,
+    aiCalls: 0, aiInputTokens: 0, aiOutputTokens: 0, aiReasoningTokens: 0,
+    aiEstimatedCostUsd: 0, aiDurationMs: 0, aiProviderUsage: {}, aiFailures: [],
+    disabledAiProviders: [],
+    disabledAiModels: [],
     currentName: '', error: null, errors: [], changes: [], duplicates: [],
     feed: [], startedAt: Date.now(),
   });
@@ -568,10 +638,18 @@ async function runCatalogUpdate() {
           await recordChange(item, result);
         }
 
+        if (outcome !== 'failed') {
+          await bumpAnalysis(getProgress, patchProgress, result.analysis, item);
+        }
+
         await pushFeed(
           getProgress, patchProgress, scraped, item, outcome,
           result.error, result.changedFields,
-          { ...(result.product || {}), previousCaseCost: result.previousCaseCost }
+          {
+            ...(result.product || {}),
+            previousCaseCost: result.previousCaseCost,
+            analysis: result.analysis || null,
+          }
         );
       } catch (e) {
         await bump('failed', item, e.message);
@@ -614,6 +692,7 @@ async function refreshProduct(settings, item, scraped) {
     return { ok: false, error: 'Could not read a case size from the page', changedFields: [] };
   }
 
+  const progress = (await getProgress()) || {};
   const res = await fetch(`${settings.apiUrl}/api/catalog`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${settings.catalogToken}` },
@@ -636,6 +715,9 @@ async function refreshProduct(settings, item, scraped) {
       vendorShippingEligible: scraped.vendor_shipping_eligible,
       vendorPickupEligible: scraped.vendor_pickup_eligible,
       vendorDeliveryEligible: scraped.vendor_delivery_eligible,
+      vendorStatusEvidence: scraped.vendor_status_evidence || null,
+      skipAiProviders: progress.disabledAiProviders || [],
+      skipAiModels: progress.disabledAiModels || [],
     }),
   });
 
@@ -662,6 +744,7 @@ async function refreshProduct(settings, item, scraped) {
     changedFields: data.changedFields || [],
     product: data.product,
     previousCaseCost: data.previousCaseCost,
+    analysis: data.analysis || null,
   };
 }
 
@@ -672,6 +755,7 @@ async function recordChange(item, result) {
   const cur = (await getProgress()) || {};
   const changes = (cur.changes || []).slice(0, 99);
   changes.push({
+    standardProductId: p.id || item.id || null,
     name: p.name || item.name,
     fields: result.changedFields,
     previousCaseCost: result.previousCaseCost ?? null,
@@ -921,6 +1005,11 @@ async function runSelectedImport() {
     selectedImport: {
       running: true, done: false, canceling: false,
       total: items.length, processed: 0, added: 0, updated: 0, existed: 0, failed: 0,
+      aiUsed: 0, aiReused: 0, aiIncomplete: 0,
+      aiCalls: 0, aiInputTokens: 0, aiOutputTokens: 0, aiReasoningTokens: 0,
+      aiEstimatedCostUsd: 0, aiDurationMs: 0, aiProviderUsage: {}, aiFailures: [],
+      disabledAiProviders: [],
+      disabledAiModels: [],
       currentName: '', error: null, errors: [], results: [], feed: [], startedAt: Date.now(),
     },
   });
@@ -952,8 +1041,18 @@ async function runSelectedImport() {
             ? 'updated'
             : 'existed';
           await bumpImport(kind, item);
+          await bumpAnalysis(getImportProgress, patchImportProgress, result.analysis, item);
           await recordResult(kind, result, item);
-          await pushFeed(getImportProgress, patchImportProgress, scraped, item, kind, null, result.changedFields, result.product);
+          await pushFeed(
+            getImportProgress,
+            patchImportProgress,
+            scraped,
+            item,
+            kind,
+            null,
+            result.changedFields,
+            { ...(result.product || {}), analysis: result.analysis || null }
+          );
           await removeFromSelection(item.id); // keep only what still needs importing
         } else {
           await bumpImport('failed', item, result.error);
@@ -1011,10 +1110,13 @@ async function pushFeed(getFn, patchFn, scraped, item, outcome, error, changed, 
     vendorShippingEligible: s.vendor_shipping_eligible,
     vendorPickupEligible: s.vendor_pickup_eligible,
     vendorDeliveryEligible: s.vendor_delivery_eligible,
+    vendorStatusEvidence: s.vendor_status_evidence || null,
     previousCaseCost: p.previousCaseCost ?? null,
+    standardProductId: p.id || item.id || null,
     recommendedPrice: p.recommendedPrice ?? null,
     assortmentStatus: p.assortmentStatus || null,
     components: p.components || [],
+    analysis: p.analysis || null,
   };
 
   const cur = (await getFn()) || {};
@@ -1030,6 +1132,7 @@ async function recordResult(kind, result, item) {
   const results = (cur.results || []).slice(0, 99);
   results.push({
     kind,
+    standardProductId: p.id || null,
     name: p.name || item.name,
     url: item.url,
     image: p.image || null,
@@ -1042,6 +1145,7 @@ async function recordResult(kind, result, item) {
     previousCaseCost: result.previousCaseCost ?? null,
     assortmentStatus: p.assortmentStatus || null,
     components: p.components || [],
+    analysis: result.analysis || null,
   });
   await patchImportProgress({ results });
 }
@@ -1060,6 +1164,7 @@ async function postProduct(settings, scraped, url) {
     return { ok: false, error: `Missing ${missing.join(', ').replace(/_/g, ' ')} on the product page` };
   }
 
+  const progress = (await getImportProgress()) || {};
   const res = await fetch(`${settings.apiUrl}/api/catalog`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${settings.catalogToken}` },
@@ -1086,6 +1191,9 @@ async function postProduct(settings, scraped, url) {
       vendorShippingEligible: scraped.vendor_shipping_eligible,
       vendorPickupEligible: scraped.vendor_pickup_eligible,
       vendorDeliveryEligible: scraped.vendor_delivery_eligible,
+      vendorStatusEvidence: scraped.vendor_status_evidence || null,
+      skipAiProviders: progress.disabledAiProviders || [],
+      skipAiModels: progress.disabledAiModels || [],
     }),
   });
 
@@ -1115,6 +1223,8 @@ async function postProduct(settings, scraped, url) {
     action: data.action,
     product: data.product,
     previousCaseCost: data.previousCaseCost,
+    changedFields: data.changedFields || [],
+    analysis: data.analysis || null,
   };
 }
 

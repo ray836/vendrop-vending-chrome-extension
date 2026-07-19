@@ -345,6 +345,36 @@ async function addCurrentSamsProductToCart(quantity) {
   return { quantityAdded: requested };
 }
 
+/**
+ * Pick the count that represents sellable packages in the outer case.
+ *
+ * Retailer titles can contain more than one count. For example, Extra gum is
+ * described as "15 pc., 18 pk.": 15 is the number of sticks inside each pack,
+ * while 18 is the number of packs in the case. The old first-match regex chose
+ * 15 and made the component total look inconsistent. Prefer explicit package
+ * counts over generic item counts, and generic counts over pieces; when the same
+ * unit appears more than once, the right-most count is normally the outer case.
+ */
+function extractCaseSizeFromText(text) {
+  if (!text) return null;
+
+  const candidates = [];
+  const pattern = /(\d+)\s*(pk|pack|ct|count|pc|piece)\b/gi;
+  let match;
+  while ((match = pattern.exec(String(text))) !== null) {
+    const unit = match[2].toLowerCase();
+    const priority = unit === 'pk' || unit === 'pack'
+      ? 3
+      : unit === 'ct' || unit === 'count'
+      ? 2
+      : 1;
+    candidates.push({ value: match[1], priority, index: match.index });
+  }
+
+  candidates.sort((a, b) => b.priority - a.priority || b.index - a.index);
+  return candidates[0]?.value || null;
+}
+
 // Extract product information from the current page
 function extractProductInfo() {
   const url = window.location.href;
@@ -442,7 +472,83 @@ function parseFulfillmentOptions(text) {
   };
 }
 
+function emptyVendorStatusEvidence() {
+  return { version: 1, scope: null, fields: {} };
+}
+
+function vendorStatusEvidence(productInfo) {
+  if (!productInfo.vendor_status_evidence) {
+    productInfo.vendor_status_evidence = emptyVendorStatusEvidence();
+  }
+  return productInfo.vendor_status_evidence;
+}
+
+function elementDiagnosticSelector(element) {
+  if (!element) return null;
+  if (element.id) return `#${element.id}`;
+  const stableAttributes = ['data-testid', 'data-automation-id', 'aria-label'];
+  for (const attribute of stableAttributes) {
+    const value = element.getAttribute?.(attribute);
+    if (value) return `${element.tagName.toLowerCase()}[${attribute}="${String(value).slice(0, 120)}"]`;
+  }
+  const classes = Array.from(element.classList || []).slice(0, 3);
+  return `${element.tagName?.toLowerCase() || 'element'}${classes.map((name) => `.${name}`).join('')}`;
+}
+
+function recordVendorStatusEvidence(productInfo, field, evidence) {
+  const diagnostics = vendorStatusEvidence(productInfo);
+  const current = diagnostics.fields[field] || [];
+  diagnostics.fields[field] = [...current, {
+    source: evidence.source,
+    selector: evidence.selector || null,
+    text: String(evidence.text || '').replace(/\s+/g, ' ').trim().slice(0, 300),
+    value: evidence.value,
+  }].slice(-5);
+}
+
+function findVendorStatusScope(productInfo) {
+  const addButton = findAddToCartButton();
+  const currentPrice = Number(productInfo.case_cost);
+  const pricePattern = Number.isFinite(currentPrice)
+    ? new RegExp(`\\$\\s*${currentPrice.toFixed(2).replace('.', '\\.')}(?!\\d)`)
+    : /\$\s*\d+(?:\.\d{2})?/;
+
+  if (addButton) {
+    let candidate = addButton.parentElement;
+    while (candidate && candidate !== document.body) {
+      const text = (candidate.innerText || candidate.textContent || '').replace(/\s+/g, ' ').trim();
+      const hasCurrentPrice = pricePattern.test(text);
+      const hasPurchaseDetails = /\b(?:shipping|pickup|delivery|curbside|add to cart)\b/i.test(text);
+      // The smallest ancestor containing the current price and purchase controls is
+      // the buy box. Stop before a page-level container can absorb recommendations.
+      if (hasCurrentPrice && hasPurchaseDetails && text.length <= 8000) {
+        return { element: candidate, strategy: 'add_to_cart_ancestor' };
+      }
+      candidate = candidate.parentElement;
+    }
+  }
+
+  const selectors = [
+    '[data-testid="buy-box"]',
+    '[data-automation-id="buy-box"]',
+    '[data-testid="product-details"]',
+    '[data-automation-id="product-details"]',
+    '.product-buy-box',
+    '.product-details',
+  ];
+  for (const selector of selectors) {
+    const candidate = document.querySelector(selector);
+    const text = (candidate?.innerText || candidate?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (candidate && pricePattern.test(text) && text.length <= 8000) {
+      return { element: candidate, strategy: `selector:${selector}` };
+    }
+  }
+
+  return null;
+}
+
 function applyStructuredVendorStatus(productInfo, data) {
+  if (productInfo._structured_vendor_status_applied) return;
   for (const node of productJsonLdNodes(data)) {
     if (node['@type'] !== 'Product') continue;
     const offers = Array.isArray(node.offers) ? node.offers : [node.offers].filter(Boolean);
@@ -450,8 +556,14 @@ function applyStructuredVendorStatus(productInfo, data) {
       const availability = String(offer.availability || '').toLowerCase();
       if (availability.includes('instock') || availability.includes('limitedavailability')) {
         productInfo.vendor_availability = 'in_stock';
+        recordVendorStatusEvidence(productInfo, 'availability', {
+          source: 'json_ld', text: String(offer.availability || ''), value: 'in_stock',
+        });
       } else if (availability.includes('outofstock') || availability.includes('soldout') || availability.includes('discontinued')) {
         productInfo.vendor_availability = 'out_of_stock';
+        recordVendorStatusEvidence(productInfo, 'availability', {
+          source: 'json_ld', text: String(offer.availability || ''), value: 'out_of_stock',
+        });
       }
 
       const currentPrice = Number(offer.price);
@@ -462,41 +574,98 @@ function applyStructuredVendorStatus(productInfo, data) {
         productInfo.vendor_on_sale = true;
         productInfo.vendor_discount_amount = Math.round((regularPrice - currentPrice) * 100) / 100;
         productInfo.vendor_regular_case_cost = Math.round(regularPrice * 100) / 100;
+        recordVendorStatusEvidence(productInfo, 'sale', {
+          source: 'json_ld',
+          text: `current ${currentPrice}; regular ${regularPrice}`,
+          value: {
+            onSale: true,
+            discountAmount: productInfo.vendor_discount_amount,
+            regularCaseCost: productInfo.vendor_regular_case_cost,
+          },
+        });
       }
       if (typeof offer.priceValidUntil === 'string' && /^\d{4}-\d{2}-\d{2}/.test(offer.priceValidUntil)) {
         productInfo.vendor_sale_ends_on = offer.priceValidUntil.slice(0, 10);
+        recordVendorStatusEvidence(productInfo, 'saleEndsOn', {
+          source: 'json_ld', text: offer.priceValidUntil, value: productInfo.vendor_sale_ends_on,
+        });
       }
-      if (offer.shippingDetails) productInfo.vendor_shipping_eligible = true;
+      if (offer.shippingDetails) {
+        productInfo.vendor_shipping_eligible = true;
+        recordVendorStatusEvidence(productInfo, 'shipping', {
+          source: 'json_ld', text: 'shippingDetails present', value: true,
+        });
+      }
     }
+    Object.defineProperty(productInfo, '_structured_vendor_status_applied', {
+      value: true,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+    return;
   }
 }
 
 function applyVisibleVendorStatus(productInfo) {
-  const bodyText = (document.body?.innerText || document.body?.textContent || '')
+  const scope = findVendorStatusScope(productInfo);
+  const evidence = vendorStatusEvidence(productInfo);
+  evidence.scope = scope
+    ? { strategy: scope.strategy, selector: elementDiagnosticSelector(scope.element) }
+    : { strategy: 'none', selector: null };
+
+  // Do not fall back to document.body here. Product pages contain recommendation
+  // cards with their own sales, availability and fulfillment copy.
+  if (!scope) {
+    if (productInfo.vendor_availability === 'unknown' && findAddToCartButton()) {
+      productInfo.vendor_availability = 'in_stock';
+      recordVendorStatusEvidence(productInfo, 'availability', {
+        source: 'add_to_cart_button', text: 'Visible enabled Add to Cart button', value: 'in_stock',
+      });
+    }
+    return;
+  }
+
+  const root = scope.element;
+  const scopeText = (root.innerText || root.textContent || '')
     .replace(/\s+/g, ' ')
     .trim();
 
-  if (/\b(out of stock|sold out|currently unavailable|item is unavailable)\b/i.test(bodyText)) {
+  const unavailableMatch = scopeText.match(/\b(out of stock|sold out|currently unavailable|item is unavailable)\b/i);
+  if (unavailableMatch) {
     productInfo.vendor_availability = 'out_of_stock';
+    recordVendorStatusEvidence(productInfo, 'availability', {
+      source: 'visible_buy_box', selector: elementDiagnosticSelector(root), text: unavailableMatch[0], value: 'out_of_stock',
+    });
   } else if (productInfo.vendor_availability === 'unknown' && findAddToCartButton()) {
     productInfo.vendor_availability = 'in_stock';
+    recordVendorStatusEvidence(productInfo, 'availability', {
+      source: 'add_to_cart_button', selector: elementDiagnosticSelector(root), text: 'Visible enabled Add to Cart button', value: 'in_stock',
+    });
   }
 
-  const saleElement = document.querySelector(
+  const saleElement = root.querySelector(
     'del, s, [data-automation-id*="strike" i], [data-testid*="strike" i], [class*="strikethrough" i], [class*="was-price" i]'
   );
+  const saleCopyMatch = scopeText.match(/\b(instant savings|member savings|sale price|save \$\s*\d|was \$\s*\d)\b/i);
   if (
     saleElement ||
-    /\b(instant savings|member savings|sale price|save \$\s*\d|was \$\s*\d)\b/i.test(bodyText)
+    saleCopyMatch
   ) {
     productInfo.vendor_on_sale = true;
+    recordVendorStatusEvidence(productInfo, 'sale', {
+      source: 'visible_buy_box',
+      selector: elementDiagnosticSelector(saleElement || root),
+      text: saleElement?.textContent || saleCopyMatch?.[0] || '',
+      value: { onSale: true },
+    });
   }
 
   const currentCaseCost = Number(productInfo.case_cost);
   const struckPriceMatch = String(saleElement?.textContent || '').match(
     /\$\s*(\d+(?:\.\d{1,2})?)/
   );
-  const visiblePricePair = bodyText.match(
+  const visiblePricePair = scopeText.match(
     /\bNow\s*\$\s*(\d+(?:\.\d{1,2})?)\s+\$\s*(\d+(?:\.\d{1,2})?)/i
   );
   const regularCaseCost = Number(struckPriceMatch?.[1] || visiblePricePair?.[2]);
@@ -507,13 +676,19 @@ function applyVisibleVendorStatus(productInfo) {
   ) {
     productInfo.vendor_on_sale = true;
     productInfo.vendor_regular_case_cost = Math.round(regularCaseCost * 100) / 100;
+    recordVendorStatusEvidence(productInfo, 'regularCaseCost', {
+      source: 'visible_buy_box',
+      selector: elementDiagnosticSelector(saleElement || root),
+      text: struckPriceMatch?.[0] || visiblePricePair?.[0] || '',
+      value: productInfo.vendor_regular_case_cost,
+    });
   }
 
   // Sam's renders savings as "$6 off" beside the current price. Costco and some
   // Sam's layouts use "Save $6" instead. Keep the dollar value separate from the
   // current case cost so the app can show an unambiguous savings badge.
-  const discountMatch = bodyText.match(/\$\s*(\d+(?:\.\d{1,2})?)\s*off\b/i) ||
-    bodyText.match(/\bsave\s*\$\s*(\d+(?:\.\d{1,2})?)/i);
+  const discountMatch = scopeText.match(/\$\s*(\d+(?:\.\d{1,2})?)\s*off\b/i) ||
+    scopeText.match(/\bsave\s*\$\s*(\d+(?:\.\d{1,2})?)/i);
   if (discountMatch) {
     const amount = Number(discountMatch[1]);
     if (Number.isFinite(amount) && amount > 0) {
@@ -522,16 +697,31 @@ function applyVisibleVendorStatus(productInfo) {
       if (!productInfo.vendor_regular_case_cost && currentCaseCost > 0) {
         productInfo.vendor_regular_case_cost = Math.round((currentCaseCost + amount) * 100) / 100;
       }
+      recordVendorStatusEvidence(productInfo, 'discountAmount', {
+        source: 'visible_buy_box', selector: elementDiagnosticSelector(root), text: discountMatch[0], value: productInfo.vendor_discount_amount,
+      });
     }
   }
 
-  const visibleSaleEndsOn = parseSaleEndDate(bodyText);
-  if (visibleSaleEndsOn) productInfo.vendor_sale_ends_on = visibleSaleEndsOn;
+  const visibleSaleEndsOn = parseSaleEndDate(scopeText);
+  if (visibleSaleEndsOn) {
+    productInfo.vendor_sale_ends_on = visibleSaleEndsOn;
+    recordVendorStatusEvidence(productInfo, 'saleEndsOn', {
+      source: 'visible_buy_box', selector: elementDiagnosticSelector(root), text: `Ends ${visibleSaleEndsOn}`, value: visibleSaleEndsOn,
+    });
+  }
 
-  const fulfillment = parseFulfillmentOptions(bodyText);
+  const fulfillment = parseFulfillmentOptions(scopeText);
   if (fulfillment.shipping != null) productInfo.vendor_shipping_eligible = fulfillment.shipping;
   if (fulfillment.pickup != null) productInfo.vendor_pickup_eligible = fulfillment.pickup;
   if (fulfillment.delivery != null) productInfo.vendor_delivery_eligible = fulfillment.delivery;
+  for (const [field, value] of Object.entries(fulfillment)) {
+    if (value != null) {
+      recordVendorStatusEvidence(productInfo, field, {
+        source: 'visible_buy_box', selector: elementDiagnosticSelector(root), text: field, value,
+      });
+    }
+  }
 }
 
 // Extract Sam's Club product information
@@ -694,21 +884,16 @@ function extractSamsClubProduct() {
     }
 
     // Extract case size
-    // Strategy 1: Look in product name for patterns like "50 pk", "36 ct"
+    // Strategy 1: Prefer the outer package count when a title contains both an
+    // inner-unit count and a case count (for example "15 pc., 18 pk.").
     if (productInfo.name) {
-      const nameMatch = productInfo.name.match(/(\d+)\s*(pk|ct|count|pack|piece|pc)/i);
-      if (nameMatch) {
-        productInfo.case_size = nameMatch[1];
-      }
+      productInfo.case_size = extractCaseSizeFromText(productInfo.name);
     }
 
     // Strategy 2: Search entire page body
     if (!productInfo.case_size) {
       const bodyText = document.body.textContent;
-      const sizeMatch = bodyText.match(/(\d+)\s*(ct|count|pack|pk|piece|pc)/i);
-      if (sizeMatch) {
-        productInfo.case_size = sizeMatch[1];
-      }
+      productInfo.case_size = extractCaseSizeFromText(bodyText);
     }
 
     // The catalog dedupes on vendor_sku, so it must be one namespace, always
@@ -969,18 +1154,12 @@ function extractCostcoProduct() {
 
     // Extract case size from product name or page
     if (productInfo.name) {
-      const nameMatch = productInfo.name.match(/(\d+)\s*(pk|ct|count|pack|piece|pc)/i);
-      if (nameMatch) {
-        productInfo.case_size = nameMatch[1];
-      }
+      productInfo.case_size = extractCaseSizeFromText(productInfo.name);
     }
 
     if (!productInfo.case_size) {
       const bodyText = document.body.textContent;
-      const sizeMatch = bodyText.match(/(\d+)\s*(ct|count|pack|pk|piece|pc)/i);
-      if (sizeMatch) {
-        productInfo.case_size = sizeMatch[1];
-      }
+      productInfo.case_size = extractCaseSizeFromText(bodyText);
     }
 
     // Same rule as Sam's: the URL product id is the dedupe key; the on-page
