@@ -329,7 +329,11 @@
         <button id="update-catalog-btn" class="btn btn-secondary btn-block">
           Refresh Catalog
         </button>
-        <p class="panel-hint">Revisits every catalog item's page and updates anything that changed — price, name, description, images. Exact-barcode duplicates are merged automatically; looser matches are flagged for you.</p>
+        <details id="refresh-location-picker" class="refresh-location-picker">
+          <summary id="refresh-location-summary">Loading purchasing clubs…</summary>
+          <div id="refresh-location-options" class="refresh-location-options"></div>
+        </details>
+        <p class="panel-hint">Refreshes the selected purchasing clubs. The first club is checked fully; later clubs can stop after 10 matching products and reuse the verified offer cohort.</p>
 
         <div id="update-progress" class="hidden">
           <div class="progress-row">

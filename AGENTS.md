@@ -373,16 +373,23 @@ price-only endpoint still exists but the refresh job no longer uses it.)
 1. Popup sends `START_CATALOG_UPDATE` and polls `GET_UPDATE_PROGRESS` (progress is
    persisted in `chrome.storage.local` under `catalogUpdate`, so closing/reopening
    the popup is safe). `CANCEL_CATALOG_UPDATE` requests a stop.
-2. Background worker `GET`s the whole catalog with the maintainer Bearer token.
-3. For each item with a Sam's/Costco `vendorLink`, it navigates a **single reused
-   foreground tab** to the page, re-scrapes via the content script, and `POST`s the
-   result to `/api/catalog` **keyed by `id`** — see the gotcha below.
-4. The API's `refreshExisting()` diffs each field, writes only what moved, and
+2. Background worker loads `/api/catalog/locations`, which returns only active
+   purchasing clubs linked to at least one organization. The popup lets the user
+   select one or more of those clubs.
+3. The first club gets a full pass. Each later club checks 10 deterministic sentinel
+   products. If their complete offer signatures match the primary club, the API
+   records the remaining current offers as `inferred`; otherwise it performs the
+   full pass. A failed primary scrape always disables inference for that product.
+4. For each visited item with a Sam's/Costco `vendorLink`, it navigates a **single
+   reused foreground tab** to the page, verifies the selected club, re-scrapes via
+   the content script, and `POST`s the result to `/api/catalog` **keyed by `id`** —
+   see the gotcha below.
+5. The API's `refreshExisting()` diffs each field, writes only what moved, and
    returns `changedFields`. Pricing recomputes `recommendedPrice` **preserving the
    item's existing markup ratio**, so an owner's hand-tuned sell price survives a
    cost change. Fields the scrape couldn't read are left alone — a failed scrape
    must never null out good data.
-5. The API also returns `analysis`, the actual two-fingerprint AI decision. The
+6. The API also returns `analysis`, the actual two-fingerprint AI decision. The
    extension shows it per item and totals AI-used versus analysis-reused results.
    Its usage block includes every paid attempt (including invalid responses before
    fallback), allowing the finished summary to report estimated spend, calls, tokens,
@@ -390,7 +397,7 @@ price-only endpoint still exists but the refresh job no longer uses it.)
    failures are attached to their product and listed in the completed summary.
    A daily-quota failure disables only that model for the rest of the job; the
    extension passes the disabled-model list into each later catalog request.
-6. Afterwards it calls `GET /api/catalog?duplicates=1` and shows any groups.
+7. Afterwards it calls `GET /api/catalog?duplicates=1` and shows any groups.
 
 > ⚠️ **Refresh targets rows by `id`, never by `vendorSku`.** Legacy seed rows have
 > no `vendorSku`, so a SKU-keyed write would miss them and *create a second row*

@@ -51,9 +51,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'START_CATALOG_UPDATE') {
     // Fire-and-forget: the sweep runs in this service worker so it survives the
     // popup closing. Progress is written to storage and polled by the popup.
-    startCatalogUpdate();
+    startCatalogUpdate(request.locationIds || []);
     sendResponse({ success: true, started: true });
     return false;
+  }
+
+  if (request.type === 'GET_REFRESH_LOCATIONS') {
+    getSettings()
+      .then(fetchRefreshLocations)
+      .then((locations) => sendResponse({ success: true, locations }))
+      .catch((error) => sendResponse({ success: false, error: String(error?.message || error), locations: [] }));
+    return true;
   }
 
   if (request.type === 'CANCEL_CATALOG_UPDATE') {
@@ -555,13 +563,13 @@ async function clearFinishedJob(key, getFn) {
   if (other && !other.running) await chrome.storage.local.remove(key);
 }
 
-async function startCatalogUpdate() {
+async function startCatalogUpdate(locationIds = []) {
   if (updateRunning) return;
   updateRunning = true;
   cancelRequested = false;
   try {
     await clearFinishedJob('selectedImport', getImportProgress);
-    await runCatalogUpdate();
+    await runCatalogUpdate(locationIds);
   } catch (e) {
     console.error('[VenDrop] Catalog update failed:', e);
     await patchProgress({ running: false, done: true, error: String((e && e.message) || e), currentName: '' });
@@ -573,8 +581,149 @@ async function startCatalogUpdate() {
   }
 }
 
-async function runCatalogUpdate() {
+async function fetchRefreshLocations(settings) {
+  if (!settings.catalogToken) return [];
+  const res = await fetch(`${settings.apiUrl}/api/catalog/locations`, {
+    headers: { 'Authorization': `Bearer ${settings.catalogToken}` },
+  });
+  const data = await res.json();
+  if (!res.ok || !data.success) {
+    throw new Error(res.status === 401 ? 'Unauthorized — check your token' : (data.error || `Location list failed (${res.status})`));
+  }
+  return data.data || [];
+}
+
+async function fetchCatalogForLocation(settings, vendorLocationId) {
+  const query = vendorLocationId ? `?vendorLocationId=${encodeURIComponent(vendorLocationId)}` : '';
+  const res = await fetch(`${settings.apiUrl}/api/catalog${query}`, {
+    headers: { 'Authorization': `Bearer ${settings.catalogToken}` },
+  });
+  const data = await res.json();
+  if (!res.ok || !data.success) {
+    throw new Error(res.status === 401 ? 'Unauthorized — check your token' : (data.error || `List failed (${res.status})`));
+  }
+  return data.data || [];
+}
+
+function stableSentinelScore(item) {
+  const seed = String(item.id || item.vendorSku || item.name || '');
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
+  // Sales and previously location-specific values are the most informative. The
+  // deterministic hash keeps a rotating-looking sample without always taking the
+  // first products returned by the API.
+  const tier = (item.vendorOnSale ? 2 : 0) + (item.vendorOffer ? 1 : 0);
+  return tier * 0x100000000 + (hash >>> 0);
+}
+
+function orderWithSentinelsFirst(targets, count = 10) {
+  const sentinels = [...targets]
+    .sort((a, b) => stableSentinelScore(b) - stableSentinelScore(a))
+    .slice(0, Math.min(count, targets.length));
+  const sentinelIds = new Set(sentinels.map((item) => item.id));
+  return [...sentinels, ...targets.filter((item) => !sentinelIds.has(item.id))];
+}
+
+function offerSignature(product) {
+  if (!product) return null;
+  const cents = (value) => value == null || !isFinite(Number(value)) ? null : Math.round(Number(value) * 100);
+  return JSON.stringify({
+    caseCost: cents(product.caseCost),
+    regularCaseCost: cents(product.vendorRegularCaseCost),
+    discountAmount: cents(product.vendorDiscountAmount),
+    saleEndsOn: product.vendorSaleEndsOn || null,
+    availability: product.vendorAvailability || 'unknown',
+    onSale: product.vendorOnSale === true,
+    shipping: product.vendorShippingEligible ?? null,
+    pickup: product.vendorPickupEligible ?? null,
+    delivery: product.vendorDeliveryEligible ?? null,
+  });
+}
+
+function canInferFromCurrentPrimary(products, primarySignatures) {
+  return products.every((product) => primarySignatures.has(product.id));
+}
+
+function resolveRefreshCaseCost(scraped, item, vendorContext) {
+  const scrapedCaseCost = parseFloat(scraped?.case_cost);
+  if (isFinite(scrapedCaseCost) && scrapedCaseCost > 0) return scrapedCaseCost;
+  if (!vendorContext) return parseFloat(item.caseCost);
+  const expectedVendorLocationId = `vloc-${vendorContext.retailer}-${vendorContext.externalId}`;
+  return item.vendorOffer?.vendorLocationId === expectedVendorLocationId
+    ? parseFloat(item.caseCost)
+    : NaN;
+}
+
+function setSamsClubInTab(tabId, location) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, { type: 'SET_SAMS_CLUB', location }, (response) => {
+      if (chrome.runtime.lastError || !response) {
+        reject(new Error(chrome.runtime.lastError?.message || 'The Sam\'s Club page did not respond'));
+        return;
+      }
+      if (!response.success) {
+        reject(new Error(response.error || `Could not select ${location.name}`));
+        return;
+      }
+      resolve(response.vendorContext);
+    });
+  });
+}
+
+async function switchWorkTabLocation(tabId, location) {
+  await chrome.tabs.update(tabId, {
+    url: `https://www.samsclub.com/club/${encodeURIComponent(location.externalId)}`,
+    active: true,
+  });
+  await waitForLoad(tabId);
+  await showPopup();
+  await sleep(1200);
+  const verified = await setSamsClubInTab(tabId, location);
+  if (!verified || String(verified.externalId) !== String(location.externalId)) {
+    throw new Error(`Sam's Club did not verify ${location.name} #${location.externalId}`);
+  }
+}
+
+function verifiedScrapeContext(scraped, location) {
+  if (!location) return null;
+  const detected = scraped?.vendor_context;
+  const detectedId = detected?.externalId ? String(detected.externalId) : '';
+  if (detectedId && detectedId !== String(location.externalId)) {
+    throw new Error(`Expected ${location.name} #${location.externalId}, but the page reported club #${detectedId}`);
+  }
+  if (!detectedId) {
+    const expectedName = String(location.name || '').toLowerCase().replace(/sam['’]?s club/g, '').trim();
+    const detectedName = String(detected?.name || '').toLowerCase();
+    if (!expectedName || !detectedName.includes(expectedName)) {
+      throw new Error(`Could not verify that the product price belongs to ${location.name}`);
+    }
+  }
+  return {
+    retailer: location.retailer,
+    externalId: String(location.externalId),
+    name: location.name,
+    address: location.address || null,
+    city: location.city || null,
+    state: location.state || null,
+    postalCode: location.postalCode || null,
+    fulfillmentMode: 'pickup',
+  };
+}
+
+async function inferRemainingOffers(settings, sourceLocationId, targetLocationId, productIds, refreshRunId) {
+  const res = await fetch(`${settings.apiUrl}/api/catalog/offers/infer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${settings.catalogToken}` },
+    body: JSON.stringify({ sourceLocationId, targetLocationId, productIds, refreshRunId }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.success) throw new Error(data.error || `Inference failed (${res.status})`);
+  return data;
+}
+
+async function runCatalogUpdate(locationIds = []) {
   const settings = await getSettings();
+  const refreshRunId = `refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   await setProgress({
     running: true, done: false, canceling: false, phase: 'loading',
@@ -585,7 +734,9 @@ async function runCatalogUpdate() {
     disabledAiProviders: [],
     disabledAiModels: [],
     currentName: '', error: null, errors: [], changes: [], duplicates: [],
-    feed: [], startedAt: Date.now(),
+    feed: [], startedAt: Date.now(), refreshRunId,
+    locationTotal: 0, locationIndex: 0, currentLocation: '', inferred: 0,
+    earlyExitedLocations: [],
   });
 
   if (!settings.catalogToken) {
@@ -593,71 +744,163 @@ async function runCatalogUpdate() {
     return;
   }
 
-  // Fetch the whole catalog (maintainer Bearer path).
-  let items;
+  let allLocations;
   try {
-    const res = await fetch(`${settings.apiUrl}/api/catalog`, {
-      headers: { 'Authorization': `Bearer ${settings.catalogToken}` },
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      throw new Error(res.status === 401 ? 'Unauthorized — check your token' : (data.error || `List failed (${res.status})`));
-    }
-    items = data.data || [];
+    allLocations = await fetchRefreshLocations(settings);
+  } catch (e) {
+    await patchProgress({ running: false, done: true, error: `Could not load purchasing clubs: ${e.message}` });
+    return;
+  }
+
+  const requested = new Set(locationIds || []);
+  const selectedLocations = requested.size
+    ? allLocations.filter((location) => requested.has(location.id))
+    : allLocations;
+  if (requested.size && selectedLocations.length !== requested.size) {
+    await patchProgress({ running: false, done: true, error: 'One or more selected purchasing clubs are no longer active' });
+    return;
+  }
+
+  // Backward-compatible one-location/global pass until an organization configures
+  // its first purchasing club. No unused geographic location is invented.
+  const refreshLocations = selectedLocations.length ? selectedLocations : [null];
+  let primaryItems;
+  try {
+    primaryItems = await fetchCatalogForLocation(settings, refreshLocations[0]?.id || null);
   } catch (e) {
     await patchProgress({ running: false, done: true, error: `Could not load catalog: ${e.message}` });
     return;
   }
+  const primaryTargets = primaryItems.filter((item) => isSupportedUrl(item.vendorLink));
+  const skippedNoLink = primaryItems.length - primaryTargets.length;
+  await patchProgress({
+    phase: 'running',
+    total: primaryTargets.length * refreshLocations.length,
+    skipped: skippedNoLink * refreshLocations.length,
+    locationTotal: selectedLocations.length,
+  });
 
-  const targets = items.filter((it) => isSupportedUrl(it.vendorLink));
-  const skippedNoLink = items.length - targets.length;
-  await patchProgress({ phase: 'running', total: targets.length, skipped: skippedNoLink });
+  let processedCount = 0;
+  const primarySignatures = new Map();
 
   await withWorkTab(async (tabId) => {
-    for (let i = 0; i < targets.length; i++) {
+    for (let locationIndex = 0; locationIndex < refreshLocations.length; locationIndex++) {
       if (cancelRequested) break;
-      const item = targets[i];
-      await patchProgress({ currentName: item.name });
+      const location = refreshLocations[locationIndex];
+      if (location) await switchWorkTabLocation(tabId, location);
+      const locationItems = locationIndex === 0
+        ? primaryItems
+        : await fetchCatalogForLocation(settings, location.id);
+      const targets = locationItems.filter((item) => isSupportedUrl(item.vendorLink));
+      const orderedTargets = locationIndex === 0 ? targets : orderWithSentinelsFirst(targets, 10);
+      const sentinelCount = locationIndex === 0 ? 0 : Math.min(10, orderedTargets.length);
+      let sentinelsMatch = locationIndex > 0;
+      await patchProgress({
+        locationIndex: location ? locationIndex + 1 : 0,
+        currentLocation: location ? `${location.name} #${location.externalId}` : 'Legacy global fallback',
+      });
 
-      try {
-        const scraped = await navigateAndScrape(tabId, item.vendorLink, showPopup);
-        const result = await refreshProduct(settings, item, scraped);
+      for (let i = 0; i < orderedTargets.length; i++) {
+        if (cancelRequested) break;
+        const item = orderedTargets[i];
+        await patchProgress({ currentName: item.name });
 
-        const outcome = !result.ok
-          ? 'failed'
-          : result.changedFields.length === 0
-          ? 'existed'
-          : 'updated';
+        let result = null;
+        let scraped = null;
+        try {
+          scraped = await navigateAndScrape(tabId, item.vendorLink, showPopup);
+          const vendorContext = verifiedScrapeContext(scraped, location);
+          result = await refreshProduct(settings, item, scraped, vendorContext, refreshRunId);
 
-        if (outcome === 'failed') {
-          await bump('failed', item, result.error);
-        } else if (outcome === 'existed') {
-          await bump('unchanged', item);
-        } else {
-          await bump('updated', item);
-          await recordChange(item, result);
-        }
+          const outcome = !result.ok
+            ? 'failed'
+            : result.changedFields.length === 0
+            ? 'existed'
+            : 'updated';
 
-        if (outcome !== 'failed') {
-          await bumpAnalysis(getProgress, patchProgress, result.analysis, item);
-        }
-
-        await pushFeed(
-          getProgress, patchProgress, scraped, item, outcome,
-          result.error, result.changedFields,
-          {
-            ...(result.product || {}),
-            previousCaseCost: result.previousCaseCost,
-            analysis: result.analysis || null,
+          if (outcome === 'failed') {
+            await bump('failed', item, result.error);
+          } else if (outcome === 'existed') {
+            await bump('unchanged', item);
+          } else {
+            await bump('updated', item);
+            await recordChange(item, result);
           }
-        );
-      } catch (e) {
-        await bump('failed', item, e.message);
-        await pushFeed(getProgress, patchProgress, null, item, 'failed', e.message);
-      }
 
-      await patchProgress({ processed: i + 1 });
-      if (!cancelRequested) await sleep(POLITE_DELAY_MS); // don't hammer the retailer
+          if (outcome !== 'failed') {
+            await bumpAnalysis(getProgress, patchProgress, result.analysis, item);
+          }
+
+          await pushFeed(
+            getProgress, patchProgress, scraped, item, outcome,
+            result.error, result.changedFields,
+            {
+              ...(result.product || {}),
+              previousCaseCost: result.previousCaseCost,
+              analysis: result.analysis || null,
+            }
+          );
+
+          if (locationIndex === 0 && result.ok) {
+            primarySignatures.set(item.id, offerSignature(result.product));
+          } else if (locationIndex > 0 && i < sentinelCount) {
+            const primarySignature = primarySignatures.get(item.id);
+            if (!result.ok || !primarySignature || offerSignature(result.product) !== primarySignature) {
+              sentinelsMatch = false;
+            }
+          }
+        } catch (e) {
+          if (locationIndex > 0 && i < sentinelCount) sentinelsMatch = false;
+          await bump('failed', item, e.message);
+          await pushFeed(getProgress, patchProgress, scraped, item, 'failed', e.message);
+        }
+
+        processedCount += 1;
+        await patchProgress({ processed: processedCount });
+
+        if (locationIndex > 0 && i + 1 === sentinelCount && sentinelsMatch && !cancelRequested) {
+          const remaining = orderedTargets.slice(sentinelCount);
+          // Only infer products whose primary-club value was successfully observed
+          // during this run. One failed primary scrape makes a full secondary pass
+          // safer than copying a stale value under fresh provenance.
+          const primaryIsCurrent = canInferFromCurrentPrimary(remaining, primarySignatures);
+          if (primaryIsCurrent) {
+            try {
+              const inferred = await inferRemainingOffers(
+                settings,
+                refreshLocations[0].id,
+                location.id,
+                remaining.map((product) => product.id),
+                refreshRunId
+              );
+              if (inferred.copied !== remaining.length) {
+                throw new Error(`Expected ${remaining.length} inferred offers, received ${inferred.copied}`);
+              }
+              processedCount += remaining.length;
+              const cur = (await getProgress()) || {};
+              await patchProgress({
+                processed: processedCount,
+                inferred: (cur.inferred || 0) + inferred.copied,
+                earlyExitedLocations: [
+                  ...(cur.earlyExitedLocations || []),
+                  { id: location.id, name: location.name, sentinels: sentinelCount, inferred: inferred.copied },
+                ],
+              });
+              break;
+            } catch (e) {
+              const cur = (await getProgress()) || {};
+              const errors = (cur.errors || []).slice(0, 49);
+              errors.push({
+                name: location.name,
+                error: `Early-exit inference was skipped; continuing the full refresh: ${e.message}`,
+              });
+              await patchProgress({ errors });
+            }
+          }
+        }
+
+        if (!cancelRequested) await sleep(POLITE_DELAY_MS); // don't hammer the retailer
+      }
     }
   });
 
@@ -678,15 +921,27 @@ async function runCatalogUpdate() {
 // Push a freshly-scraped page back onto its catalog row. Targeted by `id`, not by
 // vendorSku: legacy rows have no SKU, so a SKU-keyed write would create a second
 // row instead of updating the one we're refreshing.
-async function refreshProduct(settings, item, scraped) {
+async function refreshProduct(settings, item, scraped, vendorContext = null, refreshRunId = null) {
   // Unavailable retailer pages often hide their price or pack size. Keep the last
   // known catalog values in that case so the refresh can still record "unavailable"
   // (and delivery/sale status) instead of failing before it reaches the API.
-  const caseCost = parseFloat(scraped?.case_cost || item.caseCost);
+  const expectedVendorLocationId = vendorContext
+    ? `vloc-${vendorContext.retailer}-${vendorContext.externalId}`
+    : null;
+  // A missing price may reuse a prior exact offer (for example, an unavailable
+  // product page), but a global fallback must never be promoted to an observed
+  // price for a brand-new club.
+  const caseCost = resolveRefreshCaseCost(scraped, item, vendorContext);
   const caseSize = parseInt(scraped?.case_size || item.caseSize);
 
   if (!isFinite(caseCost) || caseCost <= 0) {
-    return { ok: false, error: 'Could not read a price from the page', changedFields: [] };
+    return {
+      ok: false,
+      error: vendorContext
+        ? `Could not read an exact price for ${vendorContext.name}`
+        : 'Could not read a price from the page',
+      changedFields: [],
+    };
   }
   if (!isFinite(caseSize) || caseSize <= 0) {
     return { ok: false, error: 'Could not read a case size from the page', changedFields: [] };
@@ -716,6 +971,9 @@ async function refreshProduct(settings, item, scraped) {
       vendorPickupEligible: scraped.vendor_pickup_eligible,
       vendorDeliveryEligible: scraped.vendor_delivery_eligible,
       vendorStatusEvidence: scraped.vendor_status_evidence || null,
+      vendorContext,
+      expectedVendorLocationId,
+      refreshRunId,
       skipAiProviders: progress.disabledAiProviders || [],
       skipAiModels: progress.disabledAiModels || [],
     }),
@@ -1192,6 +1450,10 @@ async function postProduct(settings, scraped, url) {
       vendorPickupEligible: scraped.vendor_pickup_eligible,
       vendorDeliveryEligible: scraped.vendor_delivery_eligible,
       vendorStatusEvidence: scraped.vendor_status_evidence || null,
+      vendorContext: scraped.vendor_context || null,
+      expectedVendorLocationId: scraped.vendor_context?.externalId
+        ? `vloc-${scraped.vendor_context.retailer}-${scraped.vendor_context.externalId}`
+        : null,
       skipAiProviders: progress.disabledAiProviders || [],
       skipAiModels: progress.disabledAiModels || [],
     }),

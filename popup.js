@@ -94,6 +94,8 @@ const cancelUpdateBtn = document.getElementById('cancel-update-btn');
 const updateSummary = document.getElementById('update-summary');
 const updateDuplicates = document.getElementById('update-duplicates');
 const updateExtracted = document.getElementById('update-extracted');
+const refreshLocationSummary = document.getElementById('refresh-location-summary');
+const refreshLocationOptions = document.getElementById('refresh-location-options');
 
 // UI Elements - Listing-page selection queue
 const selectionPanel = document.getElementById('selection-panel');
@@ -114,6 +116,7 @@ const importExtracted = document.getElementById('import-extracted');
 let currentPageInfo = null;
 let currentProductData = null;
 let settings = null;
+let refreshLocations = [];
 
 // Initialize popup
 async function init() {
@@ -139,6 +142,7 @@ async function init() {
     showView('settings');
     return;
   }
+  await loadRefreshLocations();
 
   // During either bulk job the active tab is our own work tab, so don't present it
   // as a product the user picked — show the run instead. (The popup stays open across
@@ -824,6 +828,56 @@ function escapeHtml(s) {
   ));
 }
 
+function selectedRefreshLocationIds() {
+  return Array.from(refreshLocationOptions.querySelectorAll('input[type="checkbox"]:checked'))
+    .map((input) => input.value);
+}
+
+function updateRefreshLocationSummary() {
+  if (!refreshLocations.length) {
+    refreshLocationSummary.textContent = 'No purchasing clubs configured · legacy global refresh';
+    return;
+  }
+  const selected = selectedRefreshLocationIds().length;
+  refreshLocationSummary.textContent = `${selected} of ${refreshLocations.length} purchasing club${refreshLocations.length === 1 ? '' : 's'}`;
+}
+
+function renderRefreshLocations() {
+  if (!refreshLocations.length) {
+    refreshLocationOptions.innerHTML = '<span class="refresh-location-meta">Add active purchasing clubs in the web app under Settings → Organization. No unused location will be scanned.</span>';
+    updateRefreshLocationSummary();
+    return;
+  }
+  refreshLocationOptions.innerHTML = refreshLocations.map((location) => {
+    const place = [location.city, location.state].filter(Boolean).join(', ');
+    const observed = location.lastObservedAt
+      ? `last checked ${new Date(location.lastObservedAt).toLocaleDateString()}`
+      : 'not checked yet';
+    return `
+      <label class="refresh-location-option">
+        <input type="checkbox" value="${escapeHtml(location.id)}" checked>
+        <span>
+          ${escapeHtml(location.name)} #${escapeHtml(location.externalId)}
+          <span class="refresh-location-meta">${escapeHtml(place || 'Location')} · ${location.organizationCount || 0} org${location.organizationCount === 1 ? '' : 's'} · ${escapeHtml(observed)}</span>
+        </span>
+      </label>`;
+  }).join('');
+  refreshLocationOptions.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    input.addEventListener('change', updateRefreshLocationSummary);
+  });
+  updateRefreshLocationSummary();
+}
+
+async function loadRefreshLocations() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_REFRESH_LOCATIONS' });
+    refreshLocations = response?.success ? response.locations || [] : [];
+  } catch (error) {
+    refreshLocations = [];
+  }
+  renderRefreshLocations();
+}
+
 function renderProgress(p) {
   refreshIsRunning = !!(p && p.running);
   syncJobChrome();
@@ -859,7 +913,8 @@ function renderProgress(p) {
       : p.phase === 'duplicates'
       ? 'Checking for duplicates…'
       : 'Refreshing catalog…';
-    updateCurrent.textContent = p.currentName ? `Checking: ${p.currentName}` : '';
+    const locationPrefix = p.currentLocation ? `${p.currentLocation} · ` : '';
+    updateCurrent.textContent = p.currentName ? `${locationPrefix}Checking: ${p.currentName}` : locationPrefix.replace(/ · $/, '');
     renderFeedInto(updateExtracted, p.feed);
     cancelUpdateBtn.disabled = !!p.canceling;
     return;
@@ -903,6 +958,9 @@ function renderSummary(p) {
     ${p.aiIncomplete ? `<div class="summary-row summary-failed"><span>AI incomplete</span><span class="val">${p.aiIncomplete}</span></div>` : ''}
     <div class="summary-row"><span>Skipped (no vendor link)</span><span class="val">${p.skipped || 0}</span></div>
     <div class="summary-row summary-failed"><span>Failed</span><span class="val">${p.failed || 0}</span></div>
+    ${p.locationTotal ? `<div class="summary-row"><span>Purchasing clubs</span><span class="val">${p.locationTotal}</span></div>` : ''}
+    ${p.inferred ? `<div class="summary-row summary-reused"><span>Location offers inferred</span><span class="val">${p.inferred}</span></div>` : ''}
+    ${renderEarlyExitLocations(p.earlyExitedLocations)}
     ${renderNeedsReviewSummary(p.feed)}
     ${renderAiUsageSummary(p)}
     ${renderAiFailures(p.aiFailures)}
@@ -912,6 +970,14 @@ function renderSummary(p) {
   `;
   updateSummary.classList.remove('hidden');
   renderDuplicates(p.duplicates);
+}
+
+function renderEarlyExitLocations(locations) {
+  if (!locations || !locations.length) return '';
+  const rows = locations.map((location) =>
+    `<li>${escapeHtml(location.name)} matched on ${location.sentinels} sentinel products; ${location.inferred} remaining offers were marked inferred.</li>`
+  ).join('');
+  return `<details class="result-details"><summary>${locations.length} location${locations.length === 1 ? '' : 's'} matched the primary club</summary><ul class="result-list">${rows}</ul></details>`;
 }
 
 // Auto-merges are destructive and permanent, so they're always reported — never a
@@ -1063,8 +1129,14 @@ async function pollProgressOnce() {
 updateCatalogBtn.addEventListener('click', async () => {
   updateSummary.classList.add('hidden');
   updateCatalogBtn.disabled = true;
+  const locationIds = selectedRefreshLocationIds();
+  if (refreshLocations.length && locationIds.length === 0) {
+    showStatus('Select at least one purchasing club to refresh.', 'error');
+    updateCatalogBtn.disabled = false;
+    return;
+  }
   try {
-    await chrome.runtime.sendMessage({ type: 'START_CATALOG_UPDATE' });
+    await chrome.runtime.sendMessage({ type: 'START_CATALOG_UPDATE', locationIds });
   } catch (e) {
     // ignore — poll will reflect state
   }

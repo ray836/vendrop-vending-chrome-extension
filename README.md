@@ -213,6 +213,23 @@ Daily Gemini quotas open a model-specific circuit for the rest of that bulk job:
 later products skip the exhausted model immediately while other Gemini models and
 fallback providers remain available. The summary names any model skipped this way.
 
+### Location-aware refresh
+
+An organization can add one or more Sam's Club purchasing clubs under
+**Settings → Organization → Purchasing Clubs** and choose a default. The extension's
+Refresh Catalog panel lists only clubs actively used by at least one organization;
+clubs with no active organization link are never scanned.
+
+The first selected club receives a full refresh. For every later club, the extension
+checks 10 deterministic sentinel products first, prioritizing sale and existing
+location-offer rows. If every offer signature matches the first club, the remaining
+offers are stored as `inferred` from that club and the retailer-page loop ends early.
+Any mismatch—or any product without a successful primary observation in the same
+run—forces a full exact-club scan. Both observed and inferred decisions are appended
+to the offer history with a refresh-run ID. Current product and order reads resolve
+against the organization's default club, while each order snapshots the purchasing
+club and fulfillment mode it used.
+
 ## Development
 
 ### File Structure

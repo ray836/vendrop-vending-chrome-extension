@@ -10,6 +10,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendResponse({ success: true, productInfo });
     return false;
   }
+  if (request.type === 'GET_VENDOR_LOCATION') {
+    sendResponse({ success: true, vendorContext: extractSamsClubLocationContext() });
+    return false;
+  }
+  if (request.type === 'SET_SAMS_CLUB') {
+    setCurrentSamsClub(request.location)
+      .then((vendorContext) => sendResponse({ success: true, vendorContext }))
+      .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
+    return true;
+  }
   if (request.type === 'ADD_CURRENT_PRODUCT_TO_CART') {
     addCurrentSamsProductToCart(request.quantity)
       .then((result) => sendResponse({ success: true, ...result }))
@@ -44,6 +54,98 @@ function buttonLabel(button) {
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function extractSamsClubLocationContext() {
+  if (!window.location.hostname.endsWith('samsclub.com')) return null;
+
+  const clubPage = window.location.pathname.match(/^\/club\/(\d{3,8})(?:-|\/|$)/);
+  let externalId = clubPage ? clubPage[1] : null;
+  let name = null;
+
+  const headings = Array.from(document.querySelectorAll('h1, h2'));
+  const clubHeading = headings.find((element) => /Sam['’]?s Club\s*#?\d*/i.test(element.textContent || ''));
+  if (clubHeading) {
+    const text = (clubHeading.textContent || '').replace(/\s+/g, ' ').trim();
+    const idMatch = text.match(/#(\d{3,8})/);
+    externalId = externalId || idMatch?.[1] || null;
+    name = text.replace(/\s*#\d{3,8}.*$/, '').trim();
+  }
+
+  if (!name) {
+    const controls = Array.from(document.querySelectorAll('button, [role="button"], a'));
+    const selectedClub = controls.find((element) => {
+      if (!isVisible(element)) return false;
+      const label = buttonLabel(element);
+      return /Sam['’]?s Club/i.test(label) &&
+        !/homepage|find another|nearby|make this my club/i.test(label);
+    });
+    if (selectedClub) {
+      const label = buttonLabel(selectedClub);
+      const match = label.match(/([^|,]*?Sam['’]?s Club)(?:\s*#(\d{3,8}))?/i);
+      if (match) {
+        name = match[1].replace(/\s+/g, ' ').trim();
+        externalId = externalId || match[2] || null;
+      }
+    }
+  }
+
+  if (!externalId) {
+    const scripts = Array.from(document.scripts).slice(0, 80);
+    for (const script of scripts) {
+      const text = script.textContent || '';
+      const match = text.match(/"(?:selectedClubId|preferredClubId|clubId|clubNumber)"\s*:\s*"?(\d{3,8})"?/i);
+      if (match) {
+        externalId = match[1];
+        break;
+      }
+    }
+  }
+
+  if (!externalId && !name) return null;
+  return {
+    retailer: 'samsclub',
+    externalId,
+    name: name || `Sam's Club #${externalId}`,
+    fulfillmentMode: 'pickup',
+  };
+}
+
+async function setCurrentSamsClub(location) {
+  if (!window.location.hostname.endsWith('samsclub.com')) {
+    throw new Error('Open a Sam\'s Club page before selecting a club');
+  }
+  const expectedId = String(location?.externalId || '');
+  const pageClub = window.location.pathname.match(/^\/club\/(\d{3,8})(?:-|\/|$)/)?.[1];
+  if (!expectedId || pageClub !== expectedId) {
+    throw new Error('The club page does not match the requested purchasing location');
+  }
+
+  const makeClubButtons = Array.from(document.querySelectorAll('button')).filter((button) =>
+    isVisible(button) && /make this my club/i.test(buttonLabel(button))
+  );
+  if (makeClubButtons.length > 1) throw new Error('More than one club-selection control was found');
+  if (makeClubButtons.length === 1) {
+    makeClubButtons[0].click();
+    const deadline = Date.now() + 10000;
+    let selectionConfirmed = false;
+    while (Date.now() < deadline) {
+      const stillVisible = isVisible(makeClubButtons[0]) &&
+        /make this my club/i.test(buttonLabel(makeClubButtons[0]));
+      if (!stillVisible) {
+        selectionConfirmed = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (!selectionConfirmed) throw new Error('Sam\'s Club did not save the requested club');
+  }
+
+  const context = extractSamsClubLocationContext();
+  if (!context || context.externalId !== expectedId) {
+    throw new Error('Sam\'s Club did not confirm the requested club');
+  }
+  return { ...location, ...context, externalId: expectedId, fulfillmentMode: 'pickup' };
 }
 
 function cartItemCount() {
@@ -746,7 +848,8 @@ function extractSamsClubProduct() {
     vendor_sale_ends_on: null,
     vendor_shipping_eligible: null,
     vendor_pickup_eligible: null,
-    vendor_delivery_eligible: null
+    vendor_delivery_eligible: null,
+    vendor_context: extractSamsClubLocationContext()
   };
 
   try {
