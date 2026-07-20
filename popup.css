@@ -637,6 +637,48 @@ header h1 {
   text-align: center;
 }
 
+.refresh-location-picker {
+  margin-top: 8px;
+  border: 1px solid #dedede;
+  border-radius: 7px;
+  background: #fafafa;
+  font-size: 12px;
+}
+
+.refresh-location-picker summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  color: #444;
+  font-weight: 600;
+}
+
+.refresh-location-options {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 165px;
+  overflow-y: auto;
+  padding: 0 10px 10px;
+}
+
+.refresh-location-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  line-height: 1.3;
+}
+
+.refresh-location-option input {
+  margin-top: 2px;
+}
+
+.refresh-location-meta {
+  display: block;
+  color: #888;
+  font-size: 10px;
+  font-weight: 400;
+}
+
 #update-progress {
   margin-top: 14px;
 }
@@ -1283,6 +1325,7 @@ body.job-running #main-view #status-message,
 body.refresh-running #selection-panel,
 body.refresh-running #catalog-update-panel .panel-hint,
 body.refresh-running #catalog-update-panel .panel-divider,
+body.refresh-running #refresh-location-picker,
 body.import-running #catalog-update-panel,
 body.import-running #selection-panel > .panel-divider,
 body.import-running #selection-panel > .selection-header,
