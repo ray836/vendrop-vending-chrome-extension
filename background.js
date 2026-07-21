@@ -114,6 +114,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.type === 'START_PURCHASE_HISTORY_SYNC') {
+    handlePurchaseHistorySync(request.payload, sender).then(sendResponse);
+    return true;
+  }
+
+  if (request.type === 'GET_PURCHASE_HISTORY_PROGRESS') {
+    getPurchaseHistoryProgress().then((progress) => sendResponse({ success: true, progress }));
+    return true;
+  }
+
   return false;
 });
 
@@ -252,6 +262,7 @@ function sleep(ms) {
 
 let cartPlacementRunning = false;
 let cartPlacementCancelRequested = false;
+let purchaseHistorySyncRunning = false;
 
 async function getCartPlacementProgress() {
   const result = await chrome.storage.local.get('cartPlacement');
@@ -269,6 +280,38 @@ async function patchCartPlacementProgress(patch) {
   return next;
 }
 
+async function getPurchaseHistoryProgress() {
+  const result = await chrome.storage.local.get('purchaseHistorySync');
+  return result.purchaseHistorySync || null;
+}
+
+async function patchPurchaseHistoryProgress(patch, originTabId) {
+  const current = (await getPurchaseHistoryProgress()) || {};
+  const next = { ...current, ...patch };
+  await chrome.storage.local.set({ purchaseHistorySync: next });
+  const targetTabId = originTabId || next.originTabId;
+  if (targetTabId) {
+    try {
+      await chrome.tabs.sendMessage(targetTabId, {
+        type: 'PURCHASE_HISTORY_SYNC_PROGRESS',
+        detail: next,
+      });
+    } catch (e) {
+      // The setup tab may be navigating or closed. Storage remains authoritative
+      // and the page/popup can recover by polling it.
+    }
+  }
+  return next;
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
 function normalizeApiBaseUrl(value) {
   try {
     const url = new URL(value);
@@ -277,6 +320,175 @@ function normalizeApiBaseUrl(value) {
     return url.origin;
   } catch (e) {
     return null;
+  }
+}
+
+async function handlePurchaseHistorySync(payload, sender) {
+  const apiBaseUrl = normalizeApiBaseUrl(payload?.apiBaseUrl);
+  const syncId = String(payload?.syncId || '');
+  const extensionToken = String(payload?.extensionToken || '');
+  const requestedAt = String(payload?.requestedAt || '');
+  if (!apiBaseUrl || !syncId || !extensionToken || !requestedAt) {
+    return { success: false, error: 'Invalid purchase-history handoff' };
+  }
+  try {
+    if (!sender?.tab?.id || !sender.tab.url || new URL(sender.tab.url).origin !== apiBaseUrl) {
+      return { success: false, error: 'Purchase-history origin mismatch' };
+    }
+  } catch (e) {
+    return { success: false, error: 'Invalid purchase-history origin' };
+  }
+  if (purchaseHistorySyncRunning) {
+    const current = await getPurchaseHistoryProgress();
+    return current?.syncId === syncId
+      ? { success: true, alreadyRunning: true }
+      : { success: false, error: 'A purchase-history sync is already running' };
+  }
+
+  const job = {
+    syncId,
+    extensionToken,
+    apiBaseUrl,
+    originTabId: sender.tab.id,
+  };
+  purchaseHistorySyncRunning = true;
+  await chrome.storage.local.set({
+    purchaseHistorySync: {
+      syncId,
+      originTabId: sender.tab.id,
+      running: true,
+      done: false,
+      phase: 'starting',
+      step: 0,
+      totalSteps: 4,
+      message: 'Starting purchase-history sync…',
+      imported: 0,
+      matched: 0,
+      error: null,
+      startedAt: Date.now(),
+      finishedAt: null,
+    },
+  });
+  runPurchaseHistorySync(job)
+    .catch((error) => notifyPurchaseHistoryError(job, error))
+    .finally(() => { purchaseHistorySyncRunning = false; });
+  return { success: true, started: true };
+}
+
+function scrapePurchaseHistoryInTab(tabId) {
+  return new Promise((resolve, reject) => {
+    const attempt = (remaining) => {
+      chrome.tabs.sendMessage(tabId, { type: 'SCRAPE_SAMS_PURCHASE_HISTORY' }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          if (remaining > 1) return setTimeout(() => attempt(remaining - 1), 1000);
+          return reject(new Error(chrome.runtime.lastError?.message || 'Sam\'s Club purchase history did not respond'));
+        }
+        if (!response.success) return reject(new Error(response.error || 'Could not read purchase history'));
+        resolve(response.items || []);
+      });
+    };
+    attempt(5);
+  });
+}
+
+async function runPurchaseHistorySync(job) {
+  await patchPurchaseHistoryProgress({
+    phase: 'opening-history',
+    step: 1,
+    message: 'Opening Sam\'s Club purchase history…',
+  }, job.originTabId);
+  const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
+  await patchPurchaseHistoryProgress({ workTabId: tab.id }, job.originTabId);
+  const loaded = waitForLoad(tab.id, 45000);
+  await chrome.tabs.update(tab.id, { url: 'https://www.samsclub.com/orders', active: true });
+  await loaded;
+  await sleep(2200);
+
+  await patchPurchaseHistoryProgress({
+    phase: 'reading-history',
+    step: 2,
+    message: 'Reading recent purchases…',
+  }, job.originTabId);
+  const items = await withTimeout(
+    scrapePurchaseHistoryInTab(tab.id),
+    45_000,
+    'Sam\'s Club took too long to return purchase history. Make sure you are signed in and try again.'
+  );
+  await patchPurchaseHistoryProgress({
+    phase: 'uploading',
+    step: 3,
+    message: items.length
+      ? `Saving ${items.length} recent purchase item${items.length === 1 ? '' : 's'}…`
+      : 'Saving your history connection…',
+    imported: items.length,
+  }, job.originTabId);
+
+  const controller = new AbortController();
+  const uploadTimeout = setTimeout(() => controller.abort(), 25_000);
+  let result;
+  try {
+    result = await fetchJson(`${job.apiBaseUrl}/api/integrations/sams-club/purchase-history`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${job.extensionToken}`,
+      },
+      body: JSON.stringify({ syncId: job.syncId, items }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error('VendorPro took too long to save purchase history. Try again.');
+    throw error;
+  } finally {
+    clearTimeout(uploadTimeout);
+  }
+
+  await chrome.tabs.remove(tab.id).catch(() => {});
+  await chrome.tabs.update(job.originTabId, { active: true }).catch(() => {});
+  const complete = await patchPurchaseHistoryProgress({
+    running: false,
+    done: true,
+    phase: 'complete',
+    step: 4,
+    message: result.imported === 0
+      ? 'Done — no recent product purchases were found. You can still continue setup.'
+      : result.matched === 0
+        ? `Done — ${result.imported} purchases found. None match the catalog yet, and that’s okay.`
+        : `Done — ${result.imported} purchases found; ${result.matched} match the catalog.`,
+    imported: result.imported,
+    matched: result.matched || 0,
+    stored: result.stored,
+    syncedAt: result.syncedAt,
+    finishedAt: Date.now(),
+  }, job.originTabId);
+  try {
+    await chrome.tabs.sendMessage(job.originTabId, {
+      type: 'PURCHASE_HISTORY_SYNC_COMPLETE',
+      detail: complete,
+    });
+  } catch (e) {
+    // The setup page will recover the completed state from storage when it polls.
+  }
+}
+
+async function notifyPurchaseHistoryError(job, error) {
+  const message = String(error?.message || error || 'Purchase-history sync failed');
+  console.error('[VenDrop] Purchase-history sync failed:', message);
+  const failed = await patchPurchaseHistoryProgress({
+    running: false,
+    done: true,
+    phase: 'failed',
+    message,
+    error: message,
+    finishedAt: Date.now(),
+  }, job.originTabId);
+  try {
+    await chrome.tabs.sendMessage(job.originTabId, {
+      type: 'PURCHASE_HISTORY_SYNC_ERROR',
+      detail: failed,
+    });
+  } catch (e) {
+    // The setup page will recover the failed state from storage when it polls.
   }
 }
 
@@ -1527,6 +1739,17 @@ async function postProduct(settings, scraped, url) {
     });
     await chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
     await chrome.action.setBadgeText({ text: '!' });
+  }
+  const history = await getPurchaseHistoryProgress();
+  if (history?.running && !purchaseHistorySyncRunning) {
+    await patchPurchaseHistoryProgress({
+      running: false,
+      done: true,
+      phase: 'failed',
+      message: 'Chrome interrupted purchase-history sync. Return to setup and try again.',
+      error: 'Chrome interrupted purchase-history sync. Return to setup and try again.',
+      finishedAt: Date.now(),
+    }, history.originTabId);
   }
 })();
 

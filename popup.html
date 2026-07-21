@@ -65,6 +65,23 @@
         <p class="field-hint">The extension adds cases only. Checkout and payment stay manual.</p>
       </div>
 
+      <!-- Purchase-history sync status (persists if the popup is closed) -->
+      <div id="history-view" class="view hidden">
+        <div class="info-box">
+          <p><strong id="history-status-title">Sam's Club history</strong></p>
+          <p id="history-status-message">Waiting to start…</p>
+        </div>
+        <div id="history-progress-wrap">
+          <div class="progress-row">
+            <span id="history-progress-label">Starting…</span>
+            <span id="history-progress-count">Step 0 of 4</span>
+          </div>
+          <div class="progress-track"><div id="history-progress-bar" class="progress-fill"></div></div>
+          <p id="history-result-detail" class="update-current"></p>
+        </div>
+        <p class="field-hint">No catalog matches is okay. VenDrop still saves recent purchases so they can match products added later.</p>
+      </div>
+
       <!-- Main View (shown when on supported page) -->
       <div id="main-view" class="view hidden">
         <div id="page-info" class="info-box">

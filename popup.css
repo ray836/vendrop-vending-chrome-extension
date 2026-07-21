@@ -683,6 +683,15 @@ header h1 {
   margin-top: 14px;
 }
 
+#history-progress-wrap {
+  margin-top: 14px;
+}
+
+#history-progress-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
 .progress-row {
   display: flex;
   justify-content: space-between;
