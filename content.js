@@ -38,6 +38,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
     return true;
   }
+  if (request.type === 'SCRAPE_SAMS_PURCHASE_HISTORY') {
+    scrapeSamsPurchaseHistory()
+      .then((items) => sendResponse({ success: true, items }))
+      .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
+    return true;
+  }
   return false;
 });
 
@@ -288,6 +294,102 @@ function samsProductId(value) {
   }
   const decodedMatch = decoded.match(/\/(?:p|ip)\/[^/?#]+\/(\d{6,})/i);
   return decodedMatch ? decodedMatch[1] : null;
+}
+
+function parsedHistoryDate(text) {
+  const patterns = [
+    /(?:order(?:ed)?|purchase(?:d)?|date)\s*(?:on|:)?\s*((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})/i,
+    /(?:order(?:ed)?|purchase(?:d)?|date)\s*(?:on|:)?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i,
+    /((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})/i,
+    /(\d{1,2}\/\d{1,2}\/\d{4})/,
+  ];
+  for (const pattern of patterns) {
+    const match = String(text || '').match(pattern);
+    if (!match) continue;
+    const date = new Date(match[1]);
+    if (Number.isFinite(date.getTime())) return date;
+  }
+  return null;
+}
+
+function historyOrderContainer(anchor) {
+  let node = anchor;
+  for (let depth = 0; node && node !== document.body && depth < 10; depth += 1) {
+    const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+    if (text.length < 12000 && parsedHistoryDate(text) && /\b(order|purchase|receipt)\b/i.test(text)) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return anchor.parentElement;
+}
+
+async function revealPurchaseHistory() {
+  for (let pass = 0; pass < 8; pass += 1) {
+    window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' });
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const more = Array.from(document.querySelectorAll('button, a')).find((element) => {
+      const label = buttonLabel(element);
+      return isVisible(element) && /^(load|show|view) more(?: orders| purchases)?$/i.test(label);
+    });
+    if (!more) break;
+    more.click();
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+  }
+  window.scrollTo({ top: 0, behavior: 'instant' });
+}
+
+async function scrapeSamsPurchaseHistory() {
+  if (!window.location.hostname.endsWith('samsclub.com') || !window.location.pathname.startsWith('/orders')) {
+    throw new Error('Open Sam\'s Club purchase history before syncing');
+  }
+  const pageText = (document.body.innerText || '').replace(/\s+/g, ' ');
+  if (/\bsign in\b/i.test(pageText) && !/\b(order|purchase) history\b/i.test(pageText)) {
+    throw new Error('Sign in to Sam\'s Club in the opened tab, then return to VendorPro and try again');
+  }
+
+  await revealPurchaseHistory();
+  const main = document.querySelector('main, [role="main"]') || document.body;
+  const anchors = Array.from(main.querySelectorAll('a[href]'));
+  const items = [];
+  const seen = new Set();
+  for (const anchor of anchors) {
+    const productUrl = resolveProductUrl(anchor);
+    const vendorSku = productIdFromUrl(productUrl);
+    if (!productUrl || !vendorSku) continue;
+
+    const container = historyOrderContainer(anchor);
+    const containerText = (container?.innerText || container?.textContent || '').replace(/\s+/g, ' ').trim();
+    const purchasedAt = parsedHistoryDate(containerText);
+    if (!purchasedAt) continue;
+    const ageDays = (Date.now() - purchasedAt.getTime()) / 86400000;
+    if (ageDays < -7 || ageDays > 366) continue;
+
+    const orderMatch = containerText.match(/(?:order|receipt)\s*(?:#|number|no\.?|id)?\s*[:#]?\s*([A-Z0-9-]{5,})/i);
+    const quantityMatch = containerText.match(/\b(?:qty|quantity)\s*[:x]?\s*(\d{1,3})\b/i);
+    const heading = container?.querySelector('[data-automation-id*="title" i], [data-testid*="title" i], h2, h3, h4');
+    const productName = (anchor.getAttribute('aria-label') || anchor.textContent || heading?.textContent || nameFromUrl(productUrl) || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!productName) continue;
+
+    const externalOrderId = orderMatch?.[1] || purchasedAt.toISOString().slice(0, 10);
+    const baseLineId = `${externalOrderId}:${vendorSku}`;
+    let externalLineId = baseLineId;
+    let duplicate = 2;
+    while (seen.has(externalLineId)) externalLineId = `${baseLineId}:${duplicate++}`;
+    seen.add(externalLineId);
+    items.push({
+      externalLineId,
+      externalOrderId,
+      vendorSku,
+      productName,
+      productUrl,
+      quantity: Math.max(1, Math.min(100, Number(quantityMatch?.[1] || 1))),
+      purchasedAt: purchasedAt.toISOString(),
+    });
+  }
+  return items.slice(0, 600);
 }
 
 function findIncreaseQuantityButton(root = document) {

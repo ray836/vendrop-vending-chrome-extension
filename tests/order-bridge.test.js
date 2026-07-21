@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const listeners = {};
 const dispatched = [];
 const messages = [];
+let runtimeListener = null;
 
 class CustomEvent {
   constructor(type, options = {}) {
@@ -39,6 +40,11 @@ const context = vm.createContext({
         messages.push(message);
         callback({ success: true, started: true });
       },
+      onMessage: {
+        addListener(callback) {
+          runtimeListener = callback;
+        },
+      },
     },
   },
   console,
@@ -67,4 +73,30 @@ assert.equal(messages[0].payload.orderId, 'order-1');
 assert.equal(dispatched.length, 1);
 assert.equal(dispatched[0].type, 'vendorpro:placement-ack');
 assert.equal(dispatched[0].detail.version, '1.14.1');
+
+listeners['vendorpro:sync-purchase-history']({
+  detail: {
+    syncId: 'sync-1',
+    extensionToken: 'history-token',
+    apiBaseUrl: 'http://localhost:3001',
+    requestedAt: '2026-07-20T00:00:00.000Z',
+  },
+});
+assert.equal(messages[1].type, 'START_PURCHASE_HISTORY_SYNC');
+assert.equal(messages[1].payload.syncId, 'sync-1');
+assert.equal(dispatched[1].type, 'vendorpro:purchase-history-ack');
+
+runtimeListener({
+  type: 'PURCHASE_HISTORY_SYNC_COMPLETE',
+  detail: { syncId: 'sync-1', imported: 12 },
+});
+assert.equal(dispatched[2].type, 'vendorpro:purchase-history-complete');
+assert.equal(dispatched[2].detail.imported, 12);
+
+runtimeListener({
+  type: 'PURCHASE_HISTORY_SYNC_PROGRESS',
+  detail: { syncId: 'sync-1', phase: 'reading-history', step: 2 },
+});
+assert.equal(dispatched[3].type, 'vendorpro:purchase-history-progress');
+assert.equal(dispatched[3].detail.step, 2);
 console.log('order bridge fixture passed');

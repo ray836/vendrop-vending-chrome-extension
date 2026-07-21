@@ -4,6 +4,7 @@
 
 const ORDER_SIGNAL_ID = 'vendorpro-place-order-signal';
 let lastSignalKey = '';
+let lastHistorySyncKey = '';
 
 function normalizePlacement(detail) {
   if (!detail || typeof detail !== 'object') return null;
@@ -52,10 +53,81 @@ function startPlacement(detail) {
   });
 }
 
+function normalizeHistorySync(detail) {
+  if (!detail || typeof detail !== 'object') return null;
+  const syncId = String(detail.syncId || '');
+  const extensionToken = String(detail.extensionToken || '');
+  const apiBaseUrl = String(detail.apiBaseUrl || window.location.origin);
+  const requestedAt = String(detail.requestedAt || '');
+  const historyUrl = String(detail.historyUrl || 'https://www.samsclub.com/orders');
+  if (!syncId || !extensionToken || !requestedAt) return null;
+  return { syncId, extensionToken, apiBaseUrl, requestedAt, historyUrl };
+}
+
+function startHistorySync(detail) {
+  const payload = normalizeHistorySync(detail);
+  if (!payload) return;
+  const key = `${payload.syncId}:${payload.requestedAt}`;
+  if (key === lastHistorySyncKey) return;
+
+  chrome.runtime.sendMessage({ type: 'START_PURCHASE_HISTORY_SYNC', payload }, (response) => {
+    if (chrome.runtime.lastError || !response?.success) {
+      const error = chrome.runtime.lastError?.message || response?.error || 'Extension did not start purchase-history sync';
+      window.dispatchEvent(new CustomEvent('vendorpro:purchase-history-error', {
+        detail: { syncId: payload.syncId, error },
+      }));
+      return;
+    }
+    lastHistorySyncKey = key;
+    window.dispatchEvent(new CustomEvent('vendorpro:purchase-history-ack', {
+      detail: { syncId: payload.syncId, version: chrome.runtime.getManifest().version },
+    }));
+  });
+}
+
+function publishHistoryProgress(progress, expectedSyncId) {
+  if (!progress || (expectedSyncId && progress.syncId !== expectedSyncId)) return;
+  if (progress.done && progress.phase === 'complete') {
+    window.dispatchEvent(new CustomEvent('vendorpro:purchase-history-complete', { detail: progress }));
+    return;
+  }
+  if (progress.done && progress.phase === 'failed') {
+    window.dispatchEvent(new CustomEvent('vendorpro:purchase-history-error', { detail: progress }));
+    return;
+  }
+  window.dispatchEvent(new CustomEvent('vendorpro:purchase-history-progress', { detail: progress }));
+}
+
+function requestHistoryProgress(detail) {
+  const syncId = String(detail?.syncId || '');
+  if (!syncId) return;
+  chrome.runtime.sendMessage({ type: 'GET_PURCHASE_HISTORY_PROGRESS' }, (response) => {
+    if (!chrome.runtime.lastError) publishHistoryProgress(response?.progress, syncId);
+  });
+}
+
 window.addEventListener('vendorpro:place-order', (event) => startPlacement(event.detail));
+window.addEventListener('vendorpro:sync-purchase-history', (event) => startHistorySync(event.detail));
+window.addEventListener('vendorpro:get-purchase-history-progress', (event) => requestHistoryProgress(event.detail));
 window.addEventListener('vendorpro:cancel-order', (event) => {
   const orderId = String(event.detail?.orderId || '');
   if (orderId) chrome.runtime.sendMessage({ type: 'CANCEL_CART_PLACEMENT', orderId });
+});
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message.type === 'PURCHASE_HISTORY_SYNC_PROGRESS') {
+    publishHistoryProgress(message.detail);
+  }
+  if (message.type === 'PURCHASE_HISTORY_SYNC_COMPLETE') {
+    window.dispatchEvent(new CustomEvent('vendorpro:purchase-history-complete', {
+      detail: message.detail || {},
+    }));
+  }
+  if (message.type === 'PURCHASE_HISTORY_SYNC_ERROR') {
+    window.dispatchEvent(new CustomEvent('vendorpro:purchase-history-error', {
+      detail: message.detail || {},
+    }));
+  }
 });
 
 const observer = new MutationObserver(() => startPlacement(placementFromNode()));

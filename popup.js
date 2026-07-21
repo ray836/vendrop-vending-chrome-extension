@@ -34,6 +34,13 @@ const orderCurrentAction = document.getElementById('order-current-action');
 const cancelOrderBtn = document.getElementById('cancel-order-btn');
 const openCartLink = document.getElementById('open-cart-link');
 let latestCartPlacement = null;
+const historyView = document.getElementById('history-view');
+const historyStatusTitle = document.getElementById('history-status-title');
+const historyStatusMessage = document.getElementById('history-status-message');
+const historyProgressLabel = document.getElementById('history-progress-label');
+const historyProgressCount = document.getElementById('history-progress-count');
+const historyProgressBar = document.getElementById('history-progress-bar');
+const historyResultDetail = document.getElementById('history-result-detail');
 
 // UI Elements - Settings
 const catalogTokenInput = document.getElementById('catalog-token-input');
@@ -125,6 +132,21 @@ async function init() {
 
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const currentTab = tabs[0];
+  const historyProgress = await getPurchaseHistoryProgress();
+  const historyFinishedRecently = historyProgress?.done &&
+    Date.now() - Number(historyProgress.finishedAt || 0) < 15 * 60 * 1000;
+  const isHistoryWorkTab = historyProgress?.workTabId === currentTab?.id;
+  if (
+    historyProgress?.running ||
+    historyFinishedRecently ||
+    isHistoryWorkTab ||
+    isVendropSetupPage(currentTab?.url)
+  ) {
+    showView('history');
+    renderPurchaseHistoryProgress(historyProgress);
+    window.setInterval(async () => renderPurchaseHistoryProgress(await getPurchaseHistoryProgress()), 700);
+    return;
+  }
   const cartProgress = await getCartPlacementProgress();
   const isFinishedCartJobTab = cartProgress?.done && cartProgress?.workTabId === currentTab?.id;
   if (cartProgress?.running || isFinishedCartJobTab || isVendropOrdersPage(currentTab?.url)) {
@@ -226,6 +248,63 @@ function isVendropOrdersPage(url) {
   } catch (e) {
     return false;
   }
+}
+
+function isVendropSetupPage(url) {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const isLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
+    const isProduction = parsed.hostname === 'vendash-v.vercel.app';
+    return (isLocal || isProduction) && parsed.pathname.startsWith('/web/setup');
+  } catch (e) {
+    return false;
+  }
+}
+
+function getPurchaseHistoryProgress() {
+  return chrome.runtime.sendMessage({ type: 'GET_PURCHASE_HISTORY_PROGRESS' })
+    .then((response) => response?.progress || null)
+    .catch(() => null);
+}
+
+function renderPurchaseHistoryProgress(progress) {
+  const phases = {
+    starting: 'Starting securely…',
+    'opening-history': 'Opening Sam\'s Club…',
+    'reading-history': 'Reading recent purchases…',
+    uploading: 'Saving purchase signals…',
+    complete: 'Sync complete',
+    failed: 'Sync stopped',
+  };
+  const step = Number(progress?.step || 0);
+  const totalSteps = Number(progress?.totalSteps || 4);
+  const imported = Number(progress?.imported || 0);
+  const matched = Number(progress?.matched || 0);
+  const complete = progress?.phase === 'complete';
+  const failed = progress?.phase === 'failed';
+
+  historyStatusTitle.textContent = progress?.running
+    ? 'Sam\'s Club history sync in progress'
+    : complete
+      ? 'Sam\'s Club history synced'
+      : failed
+        ? 'Sam\'s Club history sync stopped'
+        : 'Sam\'s Club purchase history';
+  historyStatusMessage.textContent = progress?.error || progress?.message ||
+    'Start this optional step from VendorPro setup.';
+  historyProgressLabel.textContent = phases[progress?.phase] || 'Waiting to start…';
+  historyProgressCount.textContent = failed
+    ? 'Stopped'
+    : `Step ${Math.min(step, totalSteps)} of ${totalSteps}`;
+  historyProgressBar.style.width = failed
+    ? '100%'
+    : `${Math.min(100, totalSteps ? (step / totalSteps) * 100 : 0)}%`;
+  historyResultDetail.textContent = complete
+    ? `${imported} purchase item${imported === 1 ? '' : 's'} found · ${matched} catalog match${matched === 1 ? '' : 'es'}`
+    : progress?.running
+      ? 'You can close this popup; progress will continue.'
+      : '';
 }
 
 function getCartPlacementProgress() {
@@ -364,6 +443,7 @@ function showView(viewName) {
   notSupportedView.classList.add('hidden');
   editFormView.classList.add('hidden');
   orderView.classList.add('hidden');
+  historyView.classList.add('hidden');
 
   switch (viewName) {
     case 'settings':
@@ -384,6 +464,9 @@ function showView(viewName) {
       break;
     case 'order':
       orderView.classList.remove('hidden');
+      break;
+    case 'history':
+      historyView.classList.remove('hidden');
       break;
   }
 
