@@ -817,8 +817,122 @@ async function fetchCatalogForLocation(settings, vendorLocationId) {
   return data.data || [];
 }
 
+function retailerFromSupportedUrl(value) {
+  try {
+    const hostname = new URL(String(value || '')).hostname.toLowerCase();
+    if (hostname === 'samsclub.com' || hostname.endsWith('.samsclub.com')) return 'samsclub';
+    if (hostname === 'costco.com' || hostname.endsWith('.costco.com')) return 'costco';
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
+
+function refreshTargetKey(item) {
+  return String(
+    item.refreshTargetId ||
+    (item.sourceRetailer && item.sourceRetailerProductId
+      ? `${item.sourceRetailer}:${item.sourceRetailerProductId}`
+      : item.id || item.vendorSku || item.name || '')
+  );
+}
+
+function catalogRefreshRetailers(items) {
+  const retailers = new Set();
+  for (const item of items || []) {
+    const sources = Array.isArray(item.sources) ? item.sources : [];
+    if (sources.length) {
+      for (const source of sources) {
+        if (isSupportedUrl(source.vendorLink)) retailers.add(source.retailer);
+      }
+    } else {
+      const retailer = retailerFromSupportedUrl(item.vendorLink);
+      if (retailer) retailers.add(retailer);
+    }
+  }
+  return retailers;
+}
+
+function catalogRefreshTargets(items, retailer = null) {
+  return (items || []).flatMap((item) => {
+    const sources = Array.isArray(item.sources) ? item.sources : [];
+    if (sources.length) {
+      return sources
+        .filter((source) =>
+          isSupportedUrl(source.vendorLink) && (!retailer || source.retailer === retailer)
+        )
+        .map((source) => ({
+          ...item,
+          refreshTargetId: source.id,
+          sourceRetailer: source.retailer,
+          sourceRetailerProductId: source.retailerProductId,
+          sourceName: source.sourceName,
+          vendorLink: source.vendorLink,
+          name: source.sourceName || item.name,
+          image: source.sourceImage || item.image,
+          vendorSku: source.retailerProductId || item.vendorSku,
+          caseCost: source.caseCost,
+          caseSize: source.caseCount,
+          vendorAvailability: source.availability,
+          vendorOnSale: source.onSale,
+          vendorRegularCaseCost: source.regularCaseCost,
+          vendorDiscountAmount: source.discountAmount,
+          vendorSaleEndsOn: source.saleEndsOn,
+          vendorShippingEligible: source.shippingEligible,
+          vendorPickupEligible: source.pickupEligible,
+          vendorDeliveryEligible: source.deliveryEligible,
+        }));
+    }
+
+    const legacyRetailer = retailerFromSupportedUrl(item.vendorLink);
+    if (!legacyRetailer || (retailer && legacyRetailer !== retailer)) return [];
+    return [{
+      ...item,
+      refreshTargetId: `legacy:${item.id}`,
+      sourceRetailer: legacyRetailer,
+      sourceRetailerProductId: item.vendorSku || null,
+    }];
+  });
+}
+
+function buildCatalogRefreshPasses(items, allLocations, selectedLocations, hasExplicitSelection) {
+  const sourceRetailers = catalogRefreshRetailers(items);
+  const activeSamLocations = (allLocations || []).filter((location) => location.retailer === 'samsclub');
+  const activeCostcoLocations = (allLocations || []).filter((location) => location.retailer === 'costco');
+  const selectedSamLocations = (selectedLocations || []).filter((location) => location.retailer === 'samsclub');
+  const selectedCostcoLocations = (selectedLocations || []).filter((location) => location.retailer === 'costco');
+  const passes = [];
+
+  if (sourceRetailers.has('samsclub')) {
+    if (selectedSamLocations.length) {
+      for (const location of selectedSamLocations) {
+        passes.push({
+          retailer: 'samsclub',
+          location,
+          label: `${location.name} #${location.externalId}`,
+        });
+      }
+    } else if (!activeSamLocations.length || !hasExplicitSelection) {
+      passes.push({ retailer: 'samsclub', location: null, label: "Sam's Club online listing" });
+    }
+  }
+
+  // Costco's page importer is source-complete, but the site does not expose a
+  // reliable warehouse-switch contract comparable to Sam's Club. Refresh each
+  // Costco source exactly once as an online listing and never mislabel that price
+  // as a selected warehouse observation.
+  if (
+    sourceRetailers.has('costco') &&
+    (!activeCostcoLocations.length || selectedCostcoLocations.length || !hasExplicitSelection)
+  ) {
+    passes.push({ retailer: 'costco', location: null, label: 'Costco online listing' });
+  }
+
+  return passes;
+}
+
 function stableSentinelScore(item) {
-  const seed = String(item.id || item.vendorSku || item.name || '');
+  const seed = refreshTargetKey(item);
   let hash = 0;
   for (let i = 0; i < seed.length; i++) hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
   // Sales and previously location-specific values are the most informative. The
@@ -832,8 +946,8 @@ function orderWithSentinelsFirst(targets, count = 10) {
   const sentinels = [...targets]
     .sort((a, b) => stableSentinelScore(b) - stableSentinelScore(a))
     .slice(0, Math.min(count, targets.length));
-  const sentinelIds = new Set(sentinels.map((item) => item.id));
-  return [...sentinels, ...targets.filter((item) => !sentinelIds.has(item.id))];
+  const sentinelIds = new Set(sentinels.map(refreshTargetKey));
+  return [...sentinels, ...targets.filter((item) => !sentinelIds.has(refreshTargetKey(item)))];
 }
 
 function offerSignature(product) {
@@ -853,7 +967,7 @@ function offerSignature(product) {
 }
 
 function canInferFromCurrentPrimary(products, primarySignatures) {
-  return products.every((product) => primarySignatures.has(product.id));
+  return products.every((product) => primarySignatures.has(refreshTargetKey(product)));
 }
 
 function resolveRefreshCaseCost(scraped, item, vendorContext) {
@@ -883,6 +997,9 @@ function setSamsClubInTab(tabId, location) {
 }
 
 async function switchWorkTabLocation(tabId, location) {
+  if (location.retailer !== 'samsclub') {
+    throw new Error(`${location.name} cannot be selected automatically yet; Costco sources use the online listing pass`);
+  }
   await chrome.tabs.update(tabId, {
     url: `https://www.samsclub.com/club/${encodeURIComponent(location.externalId)}`,
     active: true,
@@ -973,43 +1090,76 @@ async function runCatalogUpdate(locationIds = []) {
     return;
   }
 
-  // Backward-compatible one-location/global pass until an organization configures
-  // its first purchasing club. No unused geographic location is invented.
-  const refreshLocations = selectedLocations.length ? selectedLocations : [null];
-  let primaryItems;
+  let baseItems;
   try {
-    primaryItems = await fetchCatalogForLocation(settings, refreshLocations[0]?.id || null);
+    baseItems = await fetchCatalogForLocation(settings, null);
   } catch (e) {
     await patchProgress({ running: false, done: true, error: `Could not load catalog: ${e.message}` });
     return;
   }
-  const primaryTargets = primaryItems.filter((item) => isSupportedUrl(item.vendorLink));
-  const skippedNoLink = primaryItems.length - primaryTargets.length;
+
+  const passes = buildCatalogRefreshPasses(
+    baseItems,
+    allLocations,
+    selectedLocations,
+    requested.size > 0
+  );
+
+  const passWork = [];
+  try {
+    for (const pass of passes) {
+      const items = pass.location
+        ? await fetchCatalogForLocation(settings, pass.location.id)
+        : baseItems;
+      passWork.push({
+        ...pass,
+        targets: catalogRefreshTargets(items, pass.retailer),
+      });
+    }
+  } catch (e) {
+    await patchProgress({ running: false, done: true, error: `Could not load location catalog: ${e.message}` });
+    return;
+  }
+
+  const skippedNoLink = baseItems.reduce((count, item) => {
+    const sources = Array.isArray(item.sources) ? item.sources : [];
+    if (sources.length) return count + sources.filter((source) => !isSupportedUrl(source.vendorLink)).length;
+    return count + (isSupportedUrl(item.vendorLink) ? 0 : 1);
+  }, 0);
   await patchProgress({
     phase: 'running',
-    total: primaryTargets.length * refreshLocations.length,
-    skipped: skippedNoLink * refreshLocations.length,
-    locationTotal: selectedLocations.length,
+    total: passWork.reduce((total, pass) => total + pass.targets.length, 0),
+    skipped: skippedNoLink,
+    locationTotal: passWork.length,
   });
 
   let processedCount = 0;
-  const primarySignatures = new Map();
+  const primaryByRetailer = new Map();
 
   await withWorkTab(async (tabId) => {
-    for (let locationIndex = 0; locationIndex < refreshLocations.length; locationIndex++) {
+    for (let passIndex = 0; passIndex < passWork.length; passIndex++) {
       if (cancelRequested) break;
-      const location = refreshLocations[locationIndex];
+      const pass = passWork[passIndex];
+      const location = pass.location;
       if (location) await switchWorkTabLocation(tabId, location);
-      const locationItems = locationIndex === 0
-        ? primaryItems
-        : await fetchCatalogForLocation(settings, location.id);
-      const targets = locationItems.filter((item) => isSupportedUrl(item.vendorLink));
-      const orderedTargets = locationIndex === 0 ? targets : orderWithSentinelsFirst(targets, 10);
-      const sentinelCount = locationIndex === 0 ? 0 : Math.min(10, orderedTargets.length);
-      let sentinelsMatch = locationIndex > 0;
+      const existingPrimary = location ? primaryByRetailer.get(pass.retailer) : null;
+      const isSecondaryLocation = Boolean(location && existingPrimary);
+      const primaryState = location
+        ? existingPrimary || {
+            locationId: location.id,
+            signatures: new Map(),
+          }
+        : null;
+      if (location && !existingPrimary) primaryByRetailer.set(pass.retailer, primaryState);
+
+      const orderedTargets = isSecondaryLocation
+        ? orderWithSentinelsFirst(pass.targets, 10)
+        : pass.targets;
+      const sentinelCount = isSecondaryLocation ? Math.min(10, orderedTargets.length) : 0;
+      let sentinelsMatch = isSecondaryLocation;
       await patchProgress({
-        locationIndex: location ? locationIndex + 1 : 0,
-        currentLocation: location ? `${location.name} #${location.externalId}` : 'Legacy global fallback',
+        locationIndex: passIndex + 1,
+        currentLocation: pass.label,
       });
 
       for (let i = 0; i < orderedTargets.length; i++) {
@@ -1053,16 +1203,16 @@ async function runCatalogUpdate(locationIds = []) {
             }
           );
 
-          if (locationIndex === 0 && result.ok) {
-            primarySignatures.set(item.id, offerSignature(result.product));
-          } else if (locationIndex > 0 && i < sentinelCount) {
-            const primarySignature = primarySignatures.get(item.id);
+          if (location && !isSecondaryLocation && result.ok) {
+            primaryState.signatures.set(refreshTargetKey(item), offerSignature(result.product));
+          } else if (isSecondaryLocation && i < sentinelCount) {
+            const primarySignature = primaryState.signatures.get(refreshTargetKey(item));
             if (!result.ok || !primarySignature || offerSignature(result.product) !== primarySignature) {
               sentinelsMatch = false;
             }
           }
         } catch (e) {
-          if (locationIndex > 0 && i < sentinelCount) sentinelsMatch = false;
+          if (isSecondaryLocation && i < sentinelCount) sentinelsMatch = false;
           await bump('failed', item, e.message);
           await pushFeed(getProgress, patchProgress, scraped, item, 'failed', e.message);
         }
@@ -1070,23 +1220,24 @@ async function runCatalogUpdate(locationIds = []) {
         processedCount += 1;
         await patchProgress({ processed: processedCount });
 
-        if (locationIndex > 0 && i + 1 === sentinelCount && sentinelsMatch && !cancelRequested) {
+        if (isSecondaryLocation && i + 1 === sentinelCount && sentinelsMatch && !cancelRequested) {
           const remaining = orderedTargets.slice(sentinelCount);
           // Only infer products whose primary-club value was successfully observed
           // during this run. One failed primary scrape makes a full secondary pass
           // safer than copying a stale value under fresh provenance.
-          const primaryIsCurrent = canInferFromCurrentPrimary(remaining, primarySignatures);
+          const primaryIsCurrent = canInferFromCurrentPrimary(remaining, primaryState.signatures);
           if (primaryIsCurrent) {
             try {
+              const remainingProductIds = [...new Set(remaining.map((product) => product.id))];
               const inferred = await inferRemainingOffers(
                 settings,
-                refreshLocations[0].id,
+                primaryState.locationId,
                 location.id,
-                remaining.map((product) => product.id),
+                remainingProductIds,
                 refreshRunId
               );
-              if (inferred.copied !== remaining.length) {
-                throw new Error(`Expected ${remaining.length} inferred offers, received ${inferred.copied}`);
+              if (inferred.copied !== remainingProductIds.length) {
+                throw new Error(`Expected ${remainingProductIds.length} inferred offers, received ${inferred.copied}`);
               }
               processedCount += remaining.length;
               const cur = (await getProgress()) || {};
@@ -1171,6 +1322,14 @@ async function refreshProduct(settings, item, scraped, vendorContext = null, ref
       caseCost,
       caseSize,
       vendorSku: scraped.vendor_sku || null,
+      retailer: scraped.retailer || null,
+      retailerProductId: scraped.retailer_product_id || scraped.vendor_sku || null,
+      retailerItemNumber: scraped.retailer_item_number || scraped.item_number || null,
+      caseGtin: scraped.case_gtin || scraped.barcode || null,
+      unitGtin: scraped.unit_gtin || null,
+      unitSizeValue: scraped.unit_size_value,
+      unitSizeUnit: scraped.unit_size_unit,
+      packageType: scraped.package_type,
       barcode: scraped.barcode || null,
       vendorLink: scraped.url || item.vendorLink,
       images: scraped.images || [],
@@ -1222,6 +1381,12 @@ async function refreshProduct(settings, item, scraped, vendorContext = null, ref
 // "price, image" instead of an opaque "3 updated".
 async function recordChange(item, result) {
   const p = result.product || {};
+  const refreshedSource = (p.sources || []).find((source) =>
+    source.id === item.refreshTargetId || (
+      source.retailer === item.sourceRetailer &&
+      source.retailerProductId === item.sourceRetailerProductId
+    )
+  );
   const cur = (await getProgress()) || {};
   const changes = (cur.changes || []).slice(0, 99);
   changes.push({
@@ -1229,7 +1394,7 @@ async function recordChange(item, result) {
     name: p.name || item.name,
     fields: result.changedFields,
     previousCaseCost: result.previousCaseCost ?? null,
-    caseCost: p.caseCost ?? null,
+    caseCost: refreshedSource?.caseCost ?? p.caseCost ?? null,
     recommendedPrice: p.recommendedPrice ?? null,
     assortmentStatus: p.assortmentStatus || null,
     components: p.components || [],
@@ -1282,7 +1447,12 @@ async function autoMergeDuplicates(settings, groups) {
   const remaining = [];
 
   for (const group of groups) {
-    const decisive = group.reason === 'barcode' && group.products.length === 2;
+    // Source-backed rows carry purchasing information that deserves an explicit
+    // review. The API preserves those listings during a confirmed merge, but the
+    // extension must not choose the survivor unattended once multiple retailers
+    // are involved.
+    const sourceFree = group.products.every((product) => !(product.sources || []).length);
+    const decisive = sourceFree && group.reason === 'barcode' && group.products.length === 2;
     if (!decisive) {
       remaining.push(group);
       continue;
@@ -1474,7 +1644,7 @@ async function runSelectedImport() {
   await chrome.storage.local.set({
     selectedImport: {
       running: true, done: false, canceling: false,
-      total: items.length, processed: 0, added: 0, updated: 0, existed: 0, failed: 0,
+      total: items.length, processed: 0, added: 0, updated: 0, existed: 0, needsReview: 0, failed: 0,
       aiUsed: 0, aiReused: 0, aiIncomplete: 0,
       aiCalls: 0, aiInputTokens: 0, aiOutputTokens: 0, aiReasoningTokens: 0,
       aiEstimatedCostUsd: 0, aiDurationMs: 0, aiProviderUsage: {}, aiFailures: [],
@@ -1524,6 +1694,9 @@ async function runSelectedImport() {
             { ...(result.product || {}), analysis: result.analysis || null }
           );
           await removeFromSelection(item.id); // keep only what still needs importing
+        } else if (result.needsReview) {
+          await bumpImport('needsReview', item);
+          await pushFeed(getImportProgress, patchImportProgress, scraped, item, 'review', result.error);
         } else {
           await bumpImport('failed', item, result.error);
           await pushFeed(getImportProgress, patchImportProgress, scraped, item, 'failed', result.error);
@@ -1644,6 +1817,14 @@ async function postProduct(settings, scraped, url) {
       caseCost: parseFloat(scraped.case_cost),
       caseSize: parseInt(scraped.case_size),
       vendorSku: scraped.vendor_sku,
+      retailer: scraped.retailer || null,
+      retailerProductId: scraped.retailer_product_id || scraped.vendor_sku,
+      retailerItemNumber: scraped.retailer_item_number || scraped.item_number || null,
+      caseGtin: scraped.case_gtin || scraped.barcode || null,
+      unitGtin: scraped.unit_gtin || null,
+      unitSizeValue: scraped.unit_size_value,
+      unitSizeUnit: scraped.unit_size_unit,
+      packageType: scraped.package_type,
       barcode: scraped.barcode || null,
       vendorLink: scraped.url || url,
       category: 'Snacks',
@@ -1687,7 +1868,12 @@ async function postProduct(settings, scraped, url) {
     const error = res.status === 401
       ? 'Unauthorized — check your token'
       : (data.error || `Import failed (${res.status})`);
-    return { ok: false, error };
+    return {
+      ok: false,
+      needsReview: data.needsReview === true,
+      candidates: Array.isArray(data.candidates) ? data.candidates : [],
+      error,
+    };
   }
 
   // action: "created" (new row) | "updated" (existing row, case cost changed)

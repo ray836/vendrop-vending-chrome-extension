@@ -1115,6 +1115,7 @@ header h1 {
 .result-added { background: #e3f6e8; color: #0a7d33; }
 .result-updated { background: #e3edf9; color: #0a58a2; }
 .result-existed { background: #eee; color: #666; }
+.result-review { background: #fff3cd; color: #8a5a00; }
 
 .result-change {
   margin-top: 2px;
