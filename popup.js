@@ -16,6 +16,7 @@ const FIELD_LABEL = {
   vendorShippingEligible: 'shipping',
   vendorPickupEligible: 'pickup',
   vendorDeliveryEligible: 'delivery',
+  sources: 'supplier source',
 };
 
 // UI Elements - Views
@@ -723,6 +724,14 @@ async function saveProduct(productData) {
         caseCost: parseFloat(productData.case_cost),
         caseSize: parseInt(productData.case_size),
         vendorSku: productData.vendor_sku,
+        retailer: productData.retailer || null,
+        retailerProductId: productData.retailer_product_id || productData.vendor_sku,
+        retailerItemNumber: productData.retailer_item_number || productData.item_number || null,
+        caseGtin: productData.case_gtin || productData.barcode || null,
+        unitGtin: productData.unit_gtin || null,
+        unitSizeValue: productData.unit_size_value,
+        unitSizeUnit: productData.unit_size_unit,
+        packageType: productData.package_type,
         barcode: productData.barcode || null,
         vendorLink: productData.url,
         category: productData.category || 'Snacks',
@@ -918,7 +927,7 @@ function selectedRefreshLocationIds() {
 
 function updateRefreshLocationSummary() {
   if (!refreshLocations.length) {
-    refreshLocationSummary.textContent = 'No purchasing clubs configured · legacy global refresh';
+    refreshLocationSummary.textContent = 'No purchasing clubs configured · online supplier refresh';
     return;
   }
   const selected = selectedRefreshLocationIds().length;
@@ -936,12 +945,15 @@ function renderRefreshLocations() {
     const observed = location.lastObservedAt
       ? `last checked ${new Date(location.lastObservedAt).toLocaleDateString()}`
       : 'not checked yet';
+    const retailerNote = location.retailer === 'costco'
+      ? 'Costco online listing; warehouse-specific switching is not automated'
+      : place || 'Location';
     return `
       <label class="refresh-location-option">
         <input type="checkbox" value="${escapeHtml(location.id)}" checked>
         <span>
           ${escapeHtml(location.name)} #${escapeHtml(location.externalId)}
-          <span class="refresh-location-meta">${escapeHtml(place || 'Location')} · ${location.organizationCount || 0} org${location.organizationCount === 1 ? '' : 's'} · ${escapeHtml(observed)}</span>
+          <span class="refresh-location-meta">${escapeHtml(retailerNote)} · ${location.organizationCount || 0} org${location.organizationCount === 1 ? '' : 's'} · ${escapeHtml(observed)}</span>
         </span>
       </label>`;
   }).join('');
@@ -1041,7 +1053,7 @@ function renderSummary(p) {
     ${p.aiIncomplete ? `<div class="summary-row summary-failed"><span>AI incomplete</span><span class="val">${p.aiIncomplete}</span></div>` : ''}
     <div class="summary-row"><span>Skipped (no vendor link)</span><span class="val">${p.skipped || 0}</span></div>
     <div class="summary-row summary-failed"><span>Failed</span><span class="val">${p.failed || 0}</span></div>
-    ${p.locationTotal ? `<div class="summary-row"><span>Purchasing clubs</span><span class="val">${p.locationTotal}</span></div>` : ''}
+    ${p.locationTotal ? `<div class="summary-row"><span>Supplier refresh passes</span><span class="val">${p.locationTotal}</span></div>` : ''}
     ${p.inferred ? `<div class="summary-row summary-reused"><span>Location offers inferred</span><span class="val">${p.inferred}</span></div>` : ''}
     ${renderEarlyExitLocations(p.earlyExitedLocations)}
     ${renderNeedsReviewSummary(p.feed)}
@@ -1255,8 +1267,8 @@ async function isRefreshRunning() {
 // whatever page the job happens to be on can't be mistaken for the current page —
 // or, worse, imported by an Add button that's still live.
 function showJobRunning(label) {
-  retailerBadge.textContent = "Sam's Club";
-  retailerBadge.className = 'retailer-badge samsclub';
+  retailerBadge.textContent = 'Supplier catalog';
+  retailerBadge.className = 'retailer-badge';
   productPreview.classList.add('hidden');
   pageStatus.textContent = label;
   addProductBtn.disabled = true;
@@ -1390,6 +1402,7 @@ function renderImportSummary(p) {
     <div class="summary-row summary-added"><span>Added</span><span class="val">${p.added || 0}</span></div>
     <div class="summary-row summary-updated"><span>Updated (price changed)</span><span class="val">${p.updated || 0}</span></div>
     <div class="summary-row"><span>Unchanged</span><span class="val">${p.existed || 0}</span></div>
+    ${p.needsReview ? `<div class="summary-row summary-failed"><span>Supplier match needs review</span><span class="val">${p.needsReview}</span></div>` : ''}
     <div class="summary-row summary-ai"><span>AI used</span><span class="val">${p.aiUsed || 0}</span></div>
     <div class="summary-row summary-reused"><span>No AI (analysis same)</span><span class="val">${p.aiReused || 0}</span></div>
     ${p.aiIncomplete ? `<div class="summary-row summary-failed"><span>AI incomplete</span><span class="val">${p.aiIncomplete}</span></div>` : ''}
@@ -1403,7 +1416,7 @@ function renderImportSummary(p) {
   importSummary.classList.remove('hidden');
 }
 
-const KIND_LABEL = { added: 'Added', updated: 'Updated', existed: 'Unchanged', failed: 'Failed' };
+const KIND_LABEL = { added: 'Added', updated: 'Updated', existed: 'Unchanged', review: 'Needs review', failed: 'Failed' };
 
 // What the extractor actually read off the page, held on screen briefly after
 // each item so a bad scrape is visible as it happens rather than in the summary.

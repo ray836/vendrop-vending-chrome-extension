@@ -579,6 +579,32 @@ function extractCaseSizeFromText(text) {
   return candidates[0]?.value || null;
 }
 
+function extractUnitMeasureFromText(text) {
+  const match = String(text || '').match(/(?:^|[^\d])(\d+(?:\.\d+)?)\s*(fl\.?\s*oz|oz|ounces?|grams?|g|milliliters?|ml)\b/i);
+  if (!match) return null;
+  const value = Number(match[1]);
+  if (!isFinite(value) || value <= 0) return null;
+  const raw = match[2].toLowerCase().replace(/[.\s]/g, '');
+  const unit = raw === 'floz'
+    ? 'fl_oz'
+    : raw === 'g' || raw.startsWith('gram')
+    ? 'g'
+    : raw === 'ml' || raw.startsWith('milliliter')
+    ? 'ml'
+    : 'oz';
+  return { value, unit };
+}
+
+function inferPackageTypeFromText(text) {
+  const normalized = String(text || '').toLowerCase();
+  if (/\b(pouch|pouches|bag|bags)\b/.test(normalized)) return 'pouch';
+  if (/\b(bottle|bottles)\b/.test(normalized)) return 'bottle';
+  if (/\b(can|cans)\b/.test(normalized)) return 'can';
+  if (/\b(bar|bars)\b/.test(normalized)) return 'bar';
+  if (/\b(cup|cups)\b/.test(normalized)) return 'cup';
+  return null;
+}
+
 // Extract product information from the current page
 function extractProductInfo() {
   const url = window.location.href;
@@ -596,6 +622,14 @@ function extractProductInfo() {
     case_cost: null,
     case_size: null,
     vendor_sku: null,
+    retailer: null,
+    retailer_product_id: null,
+    retailer_item_number: null,
+    case_gtin: null,
+    unit_gtin: null,
+    unit_size_value: null,
+    unit_size_unit: null,
+    package_type: null,
     item_number: null,
     barcode: null,
     images: [],
@@ -937,6 +971,14 @@ function extractSamsClubProduct() {
     case_cost: null,
     case_size: null,
     vendor_sku: null,
+    retailer: 'samsclub',
+    retailer_product_id: null,
+    retailer_item_number: null,
+    case_gtin: null,
+    unit_gtin: null,
+    unit_size_value: null,
+    unit_size_unit: null,
+    package_type: null,
     item_number: null,
     barcode: null,
     images: [],
@@ -960,6 +1002,7 @@ function extractSamsClubProduct() {
     const urlMatch = productInfo.url.match(/\/(?:p|ip)\/[^\/]+\/(\d+)/);
     if (urlMatch) {
       productInfo.url_identifier = urlMatch[1];
+      productInfo.retailer_product_id = urlMatch[1];
     }
 
     // Extract from structured data (JSON-LD) - most reliable
@@ -1107,12 +1150,19 @@ function extractSamsClubProduct() {
     // falling back to the URL id when it's missing silently mixed two different
     // id spaces, which is how duplicate catalog rows got created.
     const bodyText = document.body.textContent;
-    productInfo.vendor_sku = productInfo.url_identifier;
+    productInfo.vendor_sku = productInfo.retailer_product_id;
 
     const itemNumberMatch = bodyText.match(/Item\s*#\s*:?\s*(\d{8,12})/i);
     if (itemNumberMatch) {
       productInfo.item_number = itemNumberMatch[1];
+      productInfo.retailer_item_number = itemNumberMatch[1];
     }
+
+    productInfo.case_gtin = productInfo.barcode;
+    const unitMeasure = extractUnitMeasureFromText(productInfo.name);
+    productInfo.unit_size_value = unitMeasure?.value ?? null;
+    productInfo.unit_size_unit = unitMeasure?.unit ?? null;
+    productInfo.package_type = inferPackageTypeFromText(productInfo.name);
 
     // Extract unit price (price per each) - optional field
     // Look for patterns like "$0.37/ea" or "$0.37 /ea"
@@ -1229,6 +1279,14 @@ function extractCostcoProduct() {
     case_cost: null,
     case_size: null,
     vendor_sku: null,
+    retailer: 'costco',
+    retailer_product_id: null,
+    retailer_item_number: null,
+    case_gtin: null,
+    unit_gtin: null,
+    unit_size_value: null,
+    unit_size_unit: null,
+    package_type: null,
     item_number: null,
     barcode: null,
     images: [],
@@ -1247,10 +1305,13 @@ function extractCostcoProduct() {
 
   try {
     // Extract URL identifier from URL
-    // Costco URLs: https://www.costco.com/product-name.product.PRODUCT_ID.html
-    const urlMatch = productInfo.url.match(/\.product\.(\d+)\.html/);
+    // Costco supports both the legacy `.product.ID.html` URL and the current
+    // `/p/-/slug/ID` route.
+    const urlMatch = productInfo.url.match(/\.product\.(\d+)\.html/) ||
+      productInfo.url.match(/\/p\/(?:-\/)?[^?#]*?\/(\d+)(?:[?#]|$)/);
     if (urlMatch) {
       productInfo.url_identifier = urlMatch[1];
+      productInfo.retailer_product_id = urlMatch[1];
     }
 
     // Extract from structured data (JSON-LD) - most reliable
@@ -1259,22 +1320,31 @@ function extractCostcoProduct() {
       try {
         const data = JSON.parse(script.textContent);
         applyStructuredVendorStatus(productInfo, data);
-        if (data['@type'] === 'Product') {
-          productInfo.name = productInfo.name || data.name;
-          productInfo.image = productInfo.image || data.image;
+        for (const node of productJsonLdNodes(data)) {
+          if (node['@type'] !== 'Product') continue;
+          productInfo.name = productInfo.name || node.name;
+          const structuredImage = Array.isArray(node.image) ? node.image[0] : node.image;
+          productInfo.image = productInfo.image || structuredImage;
+          productInfo.retailer_item_number = productInfo.retailer_item_number ||
+                                            (node.sku != null ? String(node.sku) : null) ||
+                                            (node.productID != null ? String(node.productID) : null);
 
           // Extract barcode
           productInfo.barcode = productInfo.barcode ||
-                                data.gtin13 ||
-                                data.gtin12 ||
-                                data.gtin ||
-                                data.upc ||
-                                data.ean || null;
+                                node.gtin14 ||
+                                node.gtin13 ||
+                                node.gtin12 ||
+                                node.gtin ||
+                                node.upc ||
+                                node.ean || null;
 
           // Extract price from offers
-          if (data.offers?.price && !productInfo.case_cost) {
-            productInfo.case_cost = data.offers.price.toString();
+          const offers = Array.isArray(node.offers) ? node.offers : [node.offers].filter(Boolean);
+          const pricedOffer = offers.find((offer) => Number(offer?.price) > 0);
+          if (pricedOffer && !productInfo.case_cost) {
+            productInfo.case_cost = pricedOffer.price.toString();
           }
+          break;
         }
       } catch (e) {
         // Ignore parse errors
@@ -1370,12 +1440,20 @@ function extractCostcoProduct() {
     // Same rule as Sam's: the URL product id is the dedupe key; the on-page
     // item number is informational only.
     const bodyText = document.body.textContent;
-    productInfo.vendor_sku = productInfo.url_identifier;
+    productInfo.vendor_sku = productInfo.retailer_product_id;
 
-    const itemNumberMatch = bodyText.match(/Item\s*#\s*:?\s*(\d{6,12})/i);
+    const itemNumberMatch = bodyText.match(/Item\s*#?\s*:?\s*(\d{5,12})/i);
     if (itemNumberMatch) {
       productInfo.item_number = itemNumberMatch[1];
+      productInfo.retailer_item_number = productInfo.retailer_item_number || itemNumberMatch[1];
     }
+
+    productInfo.item_number = productInfo.item_number || productInfo.retailer_item_number;
+    productInfo.case_gtin = productInfo.barcode;
+    const unitMeasure = extractUnitMeasureFromText(productInfo.name);
+    productInfo.unit_size_value = unitMeasure?.value ?? null;
+    productInfo.unit_size_unit = unitMeasure?.unit ?? null;
+    productInfo.package_type = inferPackageTypeFromText(productInfo.name);
 
     // Extract unit price (optional)
     const unitPriceMatch = bodyText.match(/\$?(\d+\.\d{2})\s*\/\s*(ea|each)/i);
@@ -1401,7 +1479,7 @@ if (productInfo.name) {
   console.log('[VenDrop] Product detected:', productInfo);
 }
 
-// ===== Multi-select on Sam's Club product cards =====
+// ===== Multi-select on retailer product cards =====
 // Draws a checkbox on every product card we can see — search/category results,
 // homepage carousels, recommendations, and cards on product pages. Checked cards
 // are queued in storage; the popup then imports them one at a time by actually
@@ -1413,13 +1491,22 @@ function isSamsClubPage() {
   return window.location.hostname.includes('samsclub.com');
 }
 
+function isCostcoPage() {
+  return window.location.hostname.includes('costco.com');
+}
+
+function isSupportedRetailerPage() {
+  return isSamsClubPage() || isCostcoPage();
+}
+
 // Sam's currently puts `link-identifier` on its full-card click target, but that
 // attribute has changed before. The product href is the durable contract. Keep
 // the old selector as a fallback for sponsored redirect links whose real `/ip/`
 // path only appears inside the `rd` query parameter.
-const SAMS_PRODUCT_LINK_SELECTOR = [
+const PRODUCT_LINK_SELECTOR = [
   'a[href*="/ip/"]',
   'a[href*="/p/"]',
+  'a[href*=".product."]',
   'a[link-identifier]',
 ].join(',');
 
@@ -1445,25 +1532,44 @@ function resolveProductUrl(anchor) {
         // Fall through to the raw-string scan below.
       }
     }
-    if (/\/(ip|p)\/.+\/\d+/.test(url.pathname)) {
+    if (isSamsClubPage() && /\/(ip|p)\/.+\/\d+/.test(url.pathname)) {
       return `${url.origin}${url.pathname}`;
     }
+    if (isCostcoPage() && (
+      /\/p\/(?:-\/)?[^?#]+\/\d+$/.test(url.pathname) ||
+      /\.product\.\d+\.html$/.test(url.pathname)
+    )) return `${url.origin}${url.pathname}`;
   }
 
   // Last resort: Midas hrefs also carry the plain product path at the very end.
-  const m = raw.match(/\/(?:ip|p)\/[^?&#]+?\/\d+/);
+  if (isSamsClubPage()) {
+    const m = raw.match(/\/(?:ip|p)\/[^?&#]+?\/\d+/);
+    return m ? `${window.location.origin}${m[0]}` : null;
+  }
+  const m = raw.match(/(?:\/p\/(?:-\/)?[^?&#]+?\/\d+|\/[^?&#]*\.product\.\d+\.html)/);
   return m ? `${window.location.origin}${m[0]}` : null;
 }
 
 // "/ip/IQBAR-Plant-Protein-Bar-Variety-Pack-12-pk/13576516009" -> "IQBAR Plant Protein Bar Variety Pack 12 pk"
 function nameFromUrl(url) {
-  const m = url.match(/\/(?:ip|p)\/([^/]+)\/\d+/);
+  const m = isCostcoPage()
+    ? url.match(/\/p\/(?:-\/)?([^/]+)\/\d+/) || url.match(/\/([^/]+)\.product\.\d+\.html/)
+    : url.match(/\/(?:ip|p)\/([^/]+)\/\d+/);
   return m ? decodeURIComponent(m[1]).replace(/-/g, ' ') : null;
 }
 
 function productIdFromUrl(url) {
-  const m = url && url.match(/\/(?:ip|p)\/[^/?#]+\/(\d+)/);
-  return m ? m[1] : null;
+  if (!url) return null;
+  const m = isCostcoPage()
+    ? url.match(/\.product\.(\d+)\.html/) || url.match(/\/p\/(?:-\/)?[^?#]*?\/(\d+)(?:[?#]|$)/)
+    : url.match(/\/(?:ip|p)\/[^/?#]+\/(\d+)/);
+  if (!m) return null;
+  return m[1];
+}
+
+function selectionIdFromUrl(url) {
+  const productId = productIdFromUrl(url);
+  return productId ? `${isCostcoPage() ? 'costco' : 'samsclub'}:${productId}` : null;
 }
 
 // Grid tiles and sponsored-banner tiles nest the anchor differently, so find the
@@ -1533,9 +1639,9 @@ function injectSelectionStyles() {
 }
 
 async function decorateTiles() {
-  if (!isSamsClubPage()) return;
+  if (!isSupportedRetailerPage()) return;
 
-  const anchors = document.querySelectorAll(SAMS_PRODUCT_LINK_SELECTOR);
+  const anchors = document.querySelectorAll(PRODUCT_LINK_SELECTOR);
   if (!anchors.length) return;
 
   injectSelectionStyles();
@@ -1545,7 +1651,7 @@ async function decorateTiles() {
 
   anchors.forEach((anchor) => {
     const url = resolveProductUrl(anchor);
-    const id = productIdFromUrl(url);
+    const id = selectionIdFromUrl(url);
     const mount = findTileMount(anchor);
     if (!id || !url || !mount) {
       skipped++;
@@ -1570,7 +1676,7 @@ async function decorateTiles() {
       nameFromUrl(url) ||
       id;
     const image = mount.querySelector('img')?.currentSrc || mount.querySelector('img')?.src || null;
-    const item = { id, url, name, image };
+    const item = { id, url, name, image, retailer: isCostcoPage() ? 'costco' : 'samsclub' };
 
     const box = document.createElement('label');
     box.className = 'vendrop-tile-check';
@@ -1622,7 +1728,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   });
 });
 
-if (isSamsClubPage()) {
+if (isSupportedRetailerPage()) {
   decorateTiles();
 
   // Grids, carousels, recommendations, and SPA navigation all re-render without

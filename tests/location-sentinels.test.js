@@ -4,10 +4,13 @@ const vm = require('node:vm');
 
 const backgroundSource = fs.readFileSync(require.resolve('../background.js'), 'utf8');
 const helpers = backgroundSource.slice(
-  backgroundSource.indexOf('function stableSentinelScore'),
+  backgroundSource.indexOf('function isSupportedUrl'),
+  backgroundSource.indexOf('function sleep')
+) + '\n' + backgroundSource.slice(
+  backgroundSource.indexOf('function retailerFromSupportedUrl'),
   backgroundSource.indexOf('function setSamsClubInTab')
 );
-const context = vm.createContext({ console });
+const context = vm.createContext({ console, URL });
 vm.runInContext(helpers, context);
 
 const products = Array.from({ length: 20 }, (_, index) => ({
