@@ -197,6 +197,7 @@ async function bumpAnalysis(getFn, patchFn, analysis, item) {
   const usage = analysis.usage || {};
   patch.aiCalls = (cur.aiCalls || 0) + (usage.calls || 0);
   patch.aiInputTokens = (cur.aiInputTokens || 0) + (usage.inputTokens || 0);
+  patch.aiCachedInputTokens = (cur.aiCachedInputTokens || 0) + (usage.cachedInputTokens || 0);
   patch.aiOutputTokens = (cur.aiOutputTokens || 0) + (usage.outputTokens || 0);
   patch.aiReasoningTokens = (cur.aiReasoningTokens || 0) + (usage.reasoningTokens || 0);
   patch.aiEstimatedCostUsd = (cur.aiEstimatedCostUsd || 0) + (usage.estimatedCostUsd || 0);
@@ -209,6 +210,7 @@ async function bumpAnalysis(getFn, patchFn, analysis, item) {
       provider: provider.provider,
       calls: (previous.calls || 0) + (provider.calls || 0),
       inputTokens: (previous.inputTokens || 0) + (provider.inputTokens || 0),
+      cachedInputTokens: (previous.cachedInputTokens || 0) + (provider.cachedInputTokens || 0),
       outputTokens: (previous.outputTokens || 0) + (provider.outputTokens || 0),
       reasoningTokens: (previous.reasoningTokens || 0) + (provider.reasoningTokens || 0),
       estimatedCostUsd: (previous.estimatedCostUsd || 0) + (provider.estimatedCostUsd || 0),
@@ -1142,7 +1144,7 @@ async function runCatalogUpdate(locationIds = [], retailer = null) {
     retailer,
     total: 0, processed: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0,
     aiUsed: 0, aiReused: 0, aiIncomplete: 0,
-    aiCalls: 0, aiInputTokens: 0, aiOutputTokens: 0, aiReasoningTokens: 0,
+    aiCalls: 0, aiInputTokens: 0, aiCachedInputTokens: 0, aiOutputTokens: 0, aiReasoningTokens: 0,
     aiEstimatedCostUsd: 0, aiDurationMs: 0, aiProviderUsage: {}, aiFailures: [],
     disabledAiProviders: [],
     disabledAiModels: [],
@@ -1637,14 +1639,84 @@ function waitForLoad(tabId, timeoutMs = 30000) {
   });
 }
 
+function productInfoReadinessSignature(productInfo) {
+  if (!productInfo) return '';
+  return JSON.stringify({
+    name: productInfo.name || null,
+    image: productInfo.image || null,
+    caseCost: productInfo.case_cost ?? null,
+    caseSize: productInfo.case_size ?? null,
+    vendorSku: productInfo.vendor_sku || null,
+    description: productInfo.description || null,
+    images: Array.isArray(productInfo.images) ? productInfo.images : [],
+    availability: productInfo.vendor_availability || 'unknown',
+    onSale: productInfo.vendor_on_sale === true,
+    regularCaseCost: productInfo.vendor_regular_case_cost ?? null,
+    discountAmount: productInfo.vendor_discount_amount ?? null,
+  });
+}
+
+function isProductInfoReady(productInfo) {
+  if (!productInfo?.name || !productInfo?.image || !productInfo?.case_size || !productInfo?.vendor_sku) {
+    return false;
+  }
+  const hasOffer = Boolean(productInfo.case_cost) ||
+    productInfo.vendor_availability === 'out_of_stock';
+  return hasOffer && Array.isArray(productInfo.images) && productInfo.images.length > 0;
+}
+
+function scrapeOnce(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, { type: 'GET_PRODUCT_INFO' }, (resp) => {
+      if (chrome.runtime.lastError || !resp || !resp.success || !resp.productInfo) {
+        reject(new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || 'No product data on page'));
+        return;
+      }
+      resolve(resp.productInfo);
+    });
+  });
+}
+
+// Most product pages settle well before the old fixed 2.5-second delay. Poll until
+// two complete snapshots agree, while retaining the same 2.5-second upper bound for
+// slow dynamic prices and galleries.
+async function scrapeWhenStable(tabId, timeoutMs = 2500) {
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  let lastProductInfo = null;
+  let lastSignature = '';
+  let matchingReads = 0;
+
+  while (Date.now() < deadline) {
+    try {
+      const productInfo = await scrapeOnce(tabId);
+      const signature = productInfoReadinessSignature(productInfo);
+      matchingReads = signature && signature === lastSignature ? matchingReads + 1 : 1;
+      lastSignature = signature;
+      lastProductInfo = productInfo;
+      if (
+        isProductInfoReady(productInfo) &&
+        matchingReads >= 2 &&
+        Date.now() - startedAt >= 500
+      ) {
+        return productInfo;
+      }
+    } catch (_) {
+      // The content script can briefly disappear during hydration/navigation.
+    }
+    await sleep(250);
+  }
+
+  return lastProductInfo || scrapeWithRetry(tabId, 3);
+}
+
 // Navigate the work tab to a product page and scrape it via the content script.
-// `onLoaded` runs once the page is up, before the settle delay.
+// `onLoaded` runs once the page is up, before readiness polling.
 async function navigateAndScrape(tabId, url, onLoaded) {
   await chrome.tabs.update(tabId, { url, active: true });
   await waitForLoad(tabId);
   if (onLoaded) await onLoaded();
-  await sleep(2500); // let dynamically-rendered prices settle
-  return scrapeWithRetry(tabId, 3);
+  return scrapeWhenStable(tabId);
 }
 
 // Focusing the work tab closes the popup, so re-open it on each product page to
@@ -1733,7 +1805,7 @@ async function runSelectedImport() {
       running: true, done: false, canceling: false,
       total: items.length, processed: 0, added: 0, updated: 0, existed: 0, needsReview: 0, failed: 0,
       aiUsed: 0, aiReused: 0, aiIncomplete: 0,
-      aiCalls: 0, aiInputTokens: 0, aiOutputTokens: 0, aiReasoningTokens: 0,
+      aiCalls: 0, aiInputTokens: 0, aiCachedInputTokens: 0, aiOutputTokens: 0, aiReasoningTokens: 0,
       aiEstimatedCostUsd: 0, aiDurationMs: 0, aiProviderUsage: {}, aiFailures: [],
       disabledAiProviders: [],
       disabledAiModels: [],
