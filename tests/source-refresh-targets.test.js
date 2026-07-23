@@ -33,6 +33,19 @@ const canonical = {
       onSale: false,
     },
     {
+      id: 'source-sams-retired',
+      retailer: 'samsclub',
+      retailerProductId: '13906655409',
+      supersededByRetailerProductId: '2410071717',
+      vendorLink: 'https://www.samsclub.com/ip/retired-example/13906655409',
+      sourceName: 'Retired listing',
+      sourceImage: 'retired.jpg',
+      caseCost: 18.98,
+      caseCount: 45,
+      availability: 'out_of_stock',
+      onSale: false,
+    },
+    {
       id: 'source-costco',
       retailer: 'costco',
       retailerProductId: '100381489',
@@ -49,12 +62,16 @@ const canonical = {
 
 const allTargets = context.catalogRefreshTargets([canonical]);
 assert.equal(allTargets.length, 2, 'one canonical product expands into both supplier listings');
+assert.ok(
+  allTargets.every((target) => target.sourceRetailerProductId !== '13906655409'),
+  'superseded listings are kept in the catalog but skipped during refresh'
+);
 assert.equal(new Set(allTargets.map(context.refreshTargetKey)).size, 2, 'supplier targets have distinct job keys');
 
 const costcoTargets = context.catalogRefreshTargets([canonical], 'costco');
 assert.equal(costcoTargets.length, 1);
 assert.equal(costcoTargets[0].refreshTargetId, 'source-costco');
-assert.equal(costcoTargets[0].vendorLink, canonical.sources[1].vendorLink);
+assert.equal(costcoTargets[0].vendorLink, canonical.sources[2].vendorLink);
 assert.equal(costcoTargets[0].caseCost, 18.49);
 
 const ordered = context.orderWithSentinelsFirst(allTargets, 1);

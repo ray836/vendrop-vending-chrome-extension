@@ -726,6 +726,7 @@ async function saveProduct(productData) {
         vendorSku: productData.vendor_sku,
         retailer: productData.retailer || null,
         retailerProductId: productData.retailer_product_id || productData.vendor_sku,
+        replacesRetailerProductId: productData.replaces_retailer_product_id || null,
         retailerItemNumber: productData.retailer_item_number || productData.item_number || null,
         caseGtin: productData.case_gtin || productData.barcode || null,
         unitGtin: productData.unit_gtin || null,

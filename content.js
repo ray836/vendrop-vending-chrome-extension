@@ -605,6 +605,27 @@ function inferPackageTypeFromText(text) {
   return null;
 }
 
+/**
+ * Sam's Club identifies a recommended successor with an explicit tracking value,
+ * for example `athpgid=itempagesubstitutions_13906655409`. This is authoritative
+ * retailer evidence; a similar title or image alone is never enough to relink a
+ * catalog source automatically.
+ */
+function extractSamsClubReplacedProductId(url, currentProductId) {
+  try {
+    const pageUrl = new URL(String(url || ''));
+    if (!pageUrl.hostname.toLowerCase().endsWith('samsclub.com')) return null;
+    const pageGroup = pageUrl.searchParams.get('athpgid') || '';
+    const match = pageGroup.match(/^itempagesubstitutions_(\d+)$/i);
+    const replacedProductId = match?.[1] || null;
+    return replacedProductId && replacedProductId !== String(currentProductId || '')
+      ? replacedProductId
+      : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // Extract product information from the current page
 function extractProductInfo() {
   const url = window.location.href;
@@ -624,6 +645,7 @@ function extractProductInfo() {
     vendor_sku: null,
     retailer: null,
     retailer_product_id: null,
+    replaces_retailer_product_id: null,
     retailer_item_number: null,
     case_gtin: null,
     unit_gtin: null,
@@ -973,6 +995,7 @@ function extractSamsClubProduct() {
     vendor_sku: null,
     retailer: 'samsclub',
     retailer_product_id: null,
+    replaces_retailer_product_id: null,
     retailer_item_number: null,
     case_gtin: null,
     unit_gtin: null,
@@ -1004,6 +1027,10 @@ function extractSamsClubProduct() {
       productInfo.url_identifier = urlMatch[1];
       productInfo.retailer_product_id = urlMatch[1];
     }
+    productInfo.replaces_retailer_product_id = extractSamsClubReplacedProductId(
+      productInfo.url,
+      productInfo.retailer_product_id
+    );
 
     // Extract from structured data (JSON-LD) - most reliable
     const scripts = document.querySelectorAll('script[type="application/ld+json"]');
@@ -1281,6 +1308,7 @@ function extractCostcoProduct() {
     vendor_sku: null,
     retailer: 'costco',
     retailer_product_id: null,
+    replaces_retailer_product_id: null,
     retailer_item_number: null,
     case_gtin: null,
     unit_gtin: null,
