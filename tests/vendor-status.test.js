@@ -99,6 +99,7 @@ function run() {
   assert.equal(unavailable.vendor_shipping_eligible, false);
   assert.equal(unavailable.vendor_pickup_eligible, true);
   assert.equal(unavailable.vendor_delivery_eligible, true);
+  assert.equal(unavailable.vendor_status_evidence.scope.strategy, 'add_to_cart_ancestor');
   addButton.disabled = false;
 
   const structured = {
@@ -143,6 +144,10 @@ function run() {
     { ...context.parseFulfillmentOptions('Shipping Arrives tomorrow Pickup Not available Delivery Not available Add to Cart') },
     { shipping: true, pickup: false, delivery: false }
   );
+  assert.deepEqual(
+    { ...context.parseFulfillmentOptions('Shipping Out of stock Pickup Not available Delivery Not available Shop similar') },
+    { shipping: false, pickup: false, delivery: false }
+  );
 
   assert.equal(
     context.parseSaleEndDate('Limit 50 Ends Sep 06', new Date('2026-07-18T12:00:00Z')),
@@ -152,6 +157,38 @@ function run() {
     context.parseSaleEndDate('Ends Jan 02', new Date('2026-07-18T12:00:00Z')),
     '2027-01-02'
   );
+
+  const warehouseScope = {
+    id: 'costco-fulfillment',
+    tagName: 'DIV',
+    classList: [],
+    parentElement: body,
+    innerText: 'How To Get It Warehouse West Valley Not Sold In This Warehouse',
+    textContent: 'How To Get It Warehouse West Valley Not Sold In This Warehouse',
+    getAttribute() { return null; },
+  };
+  const warehouseButton = {
+    parentElement: warehouseScope,
+    textContent: 'West Valley',
+    getAttribute(name) {
+      return name === 'aria-label' ? 'West Valley, current warehouse' : null;
+    },
+    getBoundingClientRect() { return { width: 100, height: 40 }; },
+    closest() { return null; },
+  };
+  document.querySelectorAll = (selector) => {
+    if (selector.includes('Button_locationselector_WarehouseSelector--submit')) return [warehouseButton];
+    return selector === 'button' ? [addButton] : [];
+  };
+  const costcoStatus = {
+    retailer: 'costco',
+    vendor_availability: 'in_stock',
+    vendor_pickup_eligible: null,
+  };
+  context.applyCostcoWarehouseStatus(costcoStatus);
+  assert.equal(costcoStatus.vendor_availability, 'out_of_stock');
+  assert.equal(costcoStatus.vendor_pickup_eligible, false);
+  assert.equal(costcoStatus.vendor_status_evidence.fields.availability[0].source, 'costco_warehouse');
 
   console.log('vendor status fixture passed');
 }

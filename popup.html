@@ -353,9 +353,14 @@
       <!-- Catalog price sweep (persistent across main / not-supported views) -->
       <div id="catalog-update-panel" class="hidden">
         <hr class="panel-divider">
-        <button id="update-catalog-btn" class="btn btn-secondary btn-block">
-          Refresh Catalog
-        </button>
+        <div id="catalog-refresh-buttons" class="catalog-refresh-buttons">
+          <button id="refresh-samsclub-btn" class="btn btn-secondary">
+            Refresh Sam’s Club
+          </button>
+          <button id="refresh-costco-btn" class="btn btn-secondary">
+            Refresh Costco
+          </button>
+        </div>
         <details id="refresh-location-picker" class="refresh-location-picker">
           <summary id="refresh-location-summary">Loading purchasing clubs…</summary>
           <div id="refresh-location-options" class="refresh-location-options"></div>

@@ -87,10 +87,16 @@ const samLocation = {
   externalId: '4730',
   name: "West Jordan Sam's Club",
 };
+const costcoLocation = {
+  id: 'vloc-costco-622',
+  retailer: 'costco',
+  externalId: '622',
+  name: 'West Valley',
+};
 const passes = context.buildCatalogRefreshPasses(
   [canonical],
-  [samLocation],
-  [samLocation],
+  [samLocation, costcoLocation],
+  [samLocation, costcoLocation],
   true
 );
 assert.deepEqual(
@@ -99,9 +105,9 @@ assert.deepEqual(
   )),
   [
     { retailer: 'samsclub', locationId: 'vloc-samsclub-4730' },
-    { retailer: 'costco', locationId: null },
+    { retailer: 'costco', locationId: 'vloc-costco-622' },
   ],
-  'Sam refresh stays location-specific while Costco uses one truthful online pass'
+  'both retailers refresh against the explicitly selected purchasing location'
 );
 
 const legacy = {

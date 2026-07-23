@@ -650,6 +650,19 @@ header h1 {
   width: 100%;
 }
 
+.catalog-refresh-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.catalog-refresh-buttons .btn {
+  width: 100%;
+  padding-left: 8px;
+  padding-right: 8px;
+  font-size: 12px;
+}
+
 .btn-small {
   padding: 6px 12px;
   font-size: 13px;

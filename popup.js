@@ -93,7 +93,9 @@ const showSettingsLinkEdit = document.getElementById('show-settings-link-edit');
 
 // UI Elements - Catalog price sweep
 const catalogUpdatePanel = document.getElementById('catalog-update-panel');
-const updateCatalogBtn = document.getElementById('update-catalog-btn');
+const catalogRefreshButtons = document.getElementById('catalog-refresh-buttons');
+const refreshSamsClubBtn = document.getElementById('refresh-samsclub-btn');
+const refreshCostcoBtn = document.getElementById('refresh-costco-btn');
 const updateProgress = document.getElementById('update-progress');
 const updateProgressLabel = document.getElementById('update-progress-label');
 const updateProgressCount = document.getElementById('update-progress-count');
@@ -952,9 +954,12 @@ function escapeHtml(s) {
   ));
 }
 
-function selectedRefreshLocationIds() {
+function selectedRefreshLocationIds(retailer = null) {
   return Array.from(refreshLocationOptions.querySelectorAll('input[type="checkbox"]:checked'))
-    .map((input) => input.value);
+    .map((input) => input.value)
+    .filter((id) => !retailer || refreshLocations.some(
+      (location) => location.id === id && location.retailer === retailer
+    ));
 }
 
 function updateRefreshLocationSummary() {
@@ -978,7 +983,7 @@ function renderRefreshLocations() {
       ? `last checked ${new Date(location.lastObservedAt).toLocaleDateString()}`
       : 'not checked yet';
     const retailerNote = location.retailer === 'costco'
-      ? 'Costco online listing; warehouse-specific switching is not automated'
+      ? `${place || 'Warehouse'} · warehouse availability; online price may differ`
       : place || 'Location';
     return `
       <label class="refresh-location-option">
@@ -1012,18 +1017,24 @@ function renderProgress(p) {
   // No job has ever run: just show the button.
   if (!p) {
     updateProgress.classList.add('hidden');
-    updateCatalogBtn.classList.remove('hidden');
-    updateCatalogBtn.disabled = false;
+    catalogRefreshButtons.classList.remove('hidden');
+    refreshSamsClubBtn.disabled = false;
+    refreshCostcoBtn.disabled = false;
     return;
   }
 
   if (p.running) {
+    const supplierName = p.retailer === 'costco'
+      ? 'Costco'
+      : p.retailer === 'samsclub'
+        ? 'Sam’s Club'
+        : 'catalog';
     // The refresh owns the active tab — keep the single-product UI and the selection
     // queue out of the way, so the run is the only thing on screen.
-    showJobRunning('Refreshing catalog…');
+    showJobRunning(`Refreshing ${supplierName}…`);
     selectionPanel.classList.add('hidden');
 
-    updateCatalogBtn.classList.add('hidden');
+    catalogRefreshButtons.classList.add('hidden');
     updateSummary.classList.add('hidden');
     updateDuplicates.classList.add('hidden');
     updateProgress.classList.remove('hidden');
@@ -1039,7 +1050,7 @@ function renderProgress(p) {
       ? 'Loading catalog…'
       : p.phase === 'duplicates'
       ? 'Checking for duplicates…'
-      : 'Refreshing catalog…';
+      : `Refreshing ${supplierName}…`;
     const locationPrefix = p.currentLocation ? `${p.currentLocation} · ` : '';
     updateCurrent.textContent = p.currentName ? `${locationPrefix}Checking: ${p.currentName}` : locationPrefix.replace(/ · $/, '');
     renderFeedInto(updateExtracted, p.feed);
@@ -1049,21 +1060,27 @@ function renderProgress(p) {
 
   // Finished (or interrupted): show the button again + a summary.
   updateProgress.classList.add('hidden');
-  updateCatalogBtn.classList.remove('hidden');
-  updateCatalogBtn.disabled = false;
+  catalogRefreshButtons.classList.remove('hidden');
+  refreshSamsClubBtn.disabled = false;
+  refreshCostcoBtn.disabled = false;
   // Keep the feed up after the run — it's the record of what just happened.
   renderFeedInto(updateExtracted, p.feed);
   if (p.done) renderSummary(p);
 }
 
 function renderSummary(p) {
+  const supplierName = p.retailer === 'costco'
+    ? 'Costco'
+    : p.retailer === 'samsclub'
+      ? 'Sam’s Club'
+      : 'Catalog';
   const title = p.error
     ? 'Refresh failed'
     : p.canceled
     ? 'Refresh canceled'
     : p.interrupted
     ? 'Refresh interrupted'
-    : 'Refresh complete';
+    : `${supplierName} refresh complete`;
 
   let errorsHtml = '';
   if (p.error) {
@@ -1253,22 +1270,29 @@ async function pollProgressOnce() {
   }
 }
 
-updateCatalogBtn.addEventListener('click', async () => {
+async function startRetailerCatalogRefresh(retailer) {
   updateSummary.classList.add('hidden');
-  updateCatalogBtn.disabled = true;
-  const locationIds = selectedRefreshLocationIds();
-  if (refreshLocations.length && locationIds.length === 0) {
-    showStatus('Select at least one purchasing club to refresh.', 'error');
-    updateCatalogBtn.disabled = false;
+  refreshSamsClubBtn.disabled = true;
+  refreshCostcoBtn.disabled = true;
+  const retailerLocations = refreshLocations.filter((location) => location.retailer === retailer);
+  const locationIds = selectedRefreshLocationIds(retailer);
+  if (retailerLocations.length && locationIds.length === 0) {
+    const supplierName = retailer === 'costco' ? 'Costco' : 'Sam’s Club';
+    showStatus(`Select at least one ${supplierName} purchasing location to refresh.`, 'error');
+    refreshSamsClubBtn.disabled = false;
+    refreshCostcoBtn.disabled = false;
     return;
   }
   try {
-    await chrome.runtime.sendMessage({ type: 'START_CATALOG_UPDATE', locationIds });
+    await chrome.runtime.sendMessage({ type: 'START_CATALOG_UPDATE', locationIds, retailer });
   } catch (e) {
     // ignore — poll will reflect state
   }
   pollProgressOnce();
-});
+}
+
+refreshSamsClubBtn.addEventListener('click', () => startRetailerCatalogRefresh('samsclub'));
+refreshCostcoBtn.addEventListener('click', () => startRetailerCatalogRefresh('costco'));
 
 cancelUpdateBtn.addEventListener('click', async () => {
   cancelUpdateBtn.disabled = true;
