@@ -11,11 +11,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
   }
   if (request.type === 'GET_VENDOR_LOCATION') {
-    sendResponse({ success: true, vendorContext: extractSamsClubLocationContext() });
+    sendResponse({
+      success: true,
+      vendorContext: isCostcoPage()
+        ? extractCostcoLocationContext()
+        : extractSamsClubLocationContext()
+    });
     return false;
   }
   if (request.type === 'SET_SAMS_CLUB') {
     setCurrentSamsClub(request.location)
+      .then((vendorContext) => sendResponse({ success: true, vendorContext }))
+      .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
+    return true;
+  }
+  if (request.type === 'SET_COSTCO_WAREHOUSE') {
+    setCurrentCostcoWarehouse(request.location)
       .then((vendorContext) => sendResponse({ success: true, vendorContext }))
       .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
     return true;
@@ -115,6 +126,92 @@ function extractSamsClubLocationContext() {
     name: name || `Sam's Club #${externalId}`,
     fulfillmentMode: 'pickup',
   };
+}
+
+function currentCostcoWarehouseButton() {
+  const controls = Array.from(document.querySelectorAll(
+    'button[data-testid="Button_locationselector_WarehouseSelector--submit"], button[aria-label$=", current warehouse"]'
+  )).filter((button) => isVisible(button));
+  const named = controls.filter((button) =>
+    /,\s*current warehouse$/i.test(button.getAttribute('aria-label') || '')
+  );
+  if (!named.length) return null;
+  const header = named.find((button) => button.closest('nav'));
+  return header || named[0];
+}
+
+function extractCostcoLocationContext() {
+  if (!window.location.hostname.endsWith('costco.com')) return null;
+  const button = currentCostcoWarehouseButton();
+  if (!button) return null;
+  const label = button.getAttribute('aria-label') || button.textContent || '';
+  const name = label.replace(/,\s*current warehouse.*$/i, '').replace(/\s+/g, ' ').trim();
+  if (!name) return null;
+  return {
+    retailer: 'costco',
+    externalId: null,
+    name,
+    fulfillmentMode: 'pickup',
+  };
+}
+
+function costcoWarehouseLinkId(link) {
+  try {
+    const match = new URL(link.href, window.location.origin).pathname.match(/\/(\d+)(?:\/)?$/);
+    return match?.[1] || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function setCurrentCostcoWarehouse(location) {
+  if (!window.location.hostname.endsWith('costco.com')) {
+    throw new Error('Open a Costco page before selecting a warehouse');
+  }
+  const expectedId = String(location?.externalId || '').trim();
+  const expectedName = String(location?.name || '').trim();
+  if (!expectedId || !expectedName) throw new Error('The Costco warehouse is missing its id or name');
+
+  const selector = currentCostcoWarehouseButton();
+  if (!selector) throw new Error('Could not find Costco’s warehouse selector');
+  selector.click();
+
+  const deadline = Date.now() + 12000;
+  let warehouseLink = null;
+  while (Date.now() < deadline) {
+    warehouseLink = Array.from(document.querySelectorAll('a[href*="/w/-/"]')).find(
+      (link) => isVisible(link) && costcoWarehouseLinkId(link) === expectedId
+    );
+    if (warehouseLink) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (!warehouseLink) throw new Error(`Costco did not list ${expectedName} #${expectedId}`);
+
+  let tile = warehouseLink.parentElement;
+  let setButton = null;
+  while (tile && tile !== document.body) {
+    setButton = Array.from(tile.querySelectorAll('button')).find((button) =>
+      isVisible(button) && /set as my warehouse/i.test(buttonLabel(button))
+    );
+    if (setButton) break;
+    tile = tile.parentElement;
+  }
+
+  // The selected warehouse is the only result without a "Set as My Warehouse"
+  // button. If its id matched above, no site mutation is needed.
+  if (setButton) setButton.click();
+
+  const confirmationDeadline = Date.now() + 12000;
+  let confirmed = null;
+  while (Date.now() < confirmationDeadline) {
+    confirmed = extractCostcoLocationContext();
+    if (confirmed?.name.toLowerCase() === expectedName.toLowerCase()) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (!confirmed || confirmed.name.toLowerCase() !== expectedName.toLowerCase()) {
+    throw new Error(`Costco did not confirm ${expectedName} #${expectedId}`);
+  }
+  return { ...location, ...confirmed, externalId: expectedId, fulfillmentMode: 'pickup' };
 }
 
 async function setCurrentSamsClub(location) {
@@ -890,7 +987,7 @@ function parseFulfillmentOptions(text) {
   }
 
   const availability = (details) =>
-    /\b(not available|unavailable|not eligible|ineligible)\b/i.test(details)
+    /\b(out of stock|sold out|not available|unavailable|not eligible|ineligible)\b/i.test(details)
       ? false
       : true;
 
@@ -936,7 +1033,22 @@ function recordVendorStatusEvidence(productInfo, field, evidence) {
 }
 
 function findVendorStatusScope(productInfo) {
-  const addButton = findAddToCartButton();
+  // Out-of-stock pages replace or disable Add to Cart. Keep using that control as
+  // a buy-box anchor even when it cannot be clicked, and recognize the replacement
+  // action Sam's Club renders ("Shop similar").
+  const addButton = findAddToCartButton() ||
+    Array.from(document.querySelectorAll('button')).find((button) => {
+      const label = buttonLabel(button);
+      return isVisible(button) && (
+        /^shop similar\b/i.test(label) ||
+        /^notify me\b/i.test(label) ||
+        /^add to cart\b/i.test(label)
+      );
+    }) ||
+    ['button[data-automation-id="atc"]', 'button[data-testid*="addToCart" i]']
+      .map((selector) => document.querySelector(selector))
+      .find((button) => button && isVisible(button)) ||
+    null;
   const currentPrice = Number(productInfo.case_cost);
   const pricePattern = Number.isFinite(currentPrice)
     ? new RegExp(`\\$\\s*${currentPrice.toFixed(2).replace('.', '\\.')}(?!\\d)`)
@@ -1155,6 +1267,47 @@ function applyVisibleVendorStatus(productInfo) {
         source: 'visible_buy_box', selector: elementDiagnosticSelector(root), text: field, value,
       });
     }
+  }
+}
+
+function applyCostcoWarehouseStatus(productInfo) {
+  if (productInfo.retailer !== 'costco') return;
+  const warehouseButton = currentCostcoWarehouseButton();
+  if (!warehouseButton) return;
+
+  let scope = warehouseButton.parentElement;
+  while (scope && scope !== document.body) {
+    const text = (scope.innerText || scope.textContent || '').replace(/\s+/g, ' ').trim();
+    if (
+      /\bHow To Get It\b/i.test(text) &&
+      /\b(?:In Stock|Out of Stock|Not Sold In This Warehouse|Unavailable)\b/i.test(text) &&
+      text.length <= 3000
+    ) break;
+    scope = scope.parentElement;
+  }
+  if (!scope || scope === document.body) return;
+
+  const text = (scope.innerText || scope.textContent || '').replace(/\s+/g, ' ').trim();
+  const unavailable = text.match(/\b(Not Sold In This Warehouse|Out of Stock|Unavailable)\b/i);
+  const inStock = text.match(/\bIn Stock\b/i);
+  if (unavailable) {
+    productInfo.vendor_availability = 'out_of_stock';
+    productInfo.vendor_pickup_eligible = false;
+    recordVendorStatusEvidence(productInfo, 'availability', {
+      source: 'costco_warehouse',
+      selector: elementDiagnosticSelector(scope),
+      text: unavailable[0],
+      value: 'out_of_stock',
+    });
+  } else if (inStock) {
+    productInfo.vendor_availability = 'in_stock';
+    productInfo.vendor_pickup_eligible = true;
+    recordVendorStatusEvidence(productInfo, 'availability', {
+      source: 'costco_warehouse',
+      selector: elementDiagnosticSelector(scope),
+      text: inStock[0],
+      value: 'in_stock',
+    });
   }
 }
 
@@ -1506,7 +1659,8 @@ function extractCostcoProduct() {
     vendor_sale_ends_on: null,
     vendor_shipping_eligible: null,
     vendor_pickup_eligible: null,
-    vendor_delivery_eligible: null
+    vendor_delivery_eligible: null,
+    vendor_context: extractCostcoLocationContext()
   };
 
   try {
@@ -1670,6 +1824,7 @@ function extractCostcoProduct() {
     productInfo.images = collectGalleryImages(productInfo.image);
     productInfo.description = collectDescription();
     applyVisibleVendorStatus(productInfo);
+    applyCostcoWarehouseStatus(productInfo);
 
     console.log('[VenDrop] Extracted Costco product:', productInfo);
   } catch (error) {

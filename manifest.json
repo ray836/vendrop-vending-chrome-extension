@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VenDrop Catalog & Ordering",
-  "version": "1.18.3",
+  "version": "1.18.6",
   "description": "Import Sam's Club and Costco products, sync opted-in purchase history, and prepare supplier carts for VenDrop orders",
   "permissions": [
     "activeTab",

@@ -51,7 +51,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'START_CATALOG_UPDATE') {
     // Fire-and-forget: the sweep runs in this service worker so it survives the
     // popup closing. Progress is written to storage and polled by the popup.
-    startCatalogUpdate(request.locationIds || []);
+    startCatalogUpdate(request.locationIds || [], request.retailer || null);
     sendResponse({ success: true, started: true });
     return false;
   }
@@ -820,13 +820,14 @@ async function clearFinishedJob(key, getFn) {
   if (other && !other.running) await chrome.storage.local.remove(key);
 }
 
-async function startCatalogUpdate(locationIds = []) {
+async function startCatalogUpdate(locationIds = [], retailer = null) {
   if (updateRunning) return;
+  const normalizedRetailer = retailer === 'samsclub' || retailer === 'costco' ? retailer : null;
   updateRunning = true;
   cancelRequested = false;
   try {
     await clearFinishedJob('selectedImport', getImportProgress);
-    await runCatalogUpdate(locationIds);
+    await runCatalogUpdate(locationIds, normalizedRetailer);
   } catch (e) {
     console.error('[VenDrop] Catalog update failed:', e);
     await patchProgress({ running: false, done: true, error: String((e && e.message) || e), currentName: '' });
@@ -966,15 +967,18 @@ function buildCatalogRefreshPasses(items, allLocations, selectedLocations, hasEx
     }
   }
 
-  // Costco's page importer is source-complete, but the site does not expose a
-  // reliable warehouse-switch contract comparable to Sam's Club. Refresh each
-  // Costco source exactly once as an online listing and never mislabel that price
-  // as a selected warehouse observation.
-  if (
-    sourceRetailers.has('costco') &&
-    (!activeCostcoLocations.length || selectedCostcoLocations.length || !hasExplicitSelection)
-  ) {
-    passes.push({ retailer: 'costco', location: null, label: 'Costco online listing' });
+  if (sourceRetailers.has('costco')) {
+    if (selectedCostcoLocations.length) {
+      for (const location of selectedCostcoLocations) {
+        passes.push({
+          retailer: 'costco',
+          location,
+          label: `${location.name} #${location.externalId}`,
+        });
+      }
+    } else if (!activeCostcoLocations.length || !hasExplicitSelection) {
+      passes.push({ retailer: 'costco', location: null, label: 'Costco online listing' });
+    }
   }
 
   return passes;
@@ -1045,9 +1049,39 @@ function setSamsClubInTab(tabId, location) {
   });
 }
 
-async function switchWorkTabLocation(tabId, location) {
+function setCostcoWarehouseInTab(tabId, location) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, { type: 'SET_COSTCO_WAREHOUSE', location }, (response) => {
+      if (chrome.runtime.lastError || !response) {
+        reject(new Error(chrome.runtime.lastError?.message || 'The Costco page did not respond'));
+        return;
+      }
+      if (!response.success) {
+        reject(new Error(response.error || `Could not select ${location.name}`));
+        return;
+      }
+      resolve(response.vendorContext);
+    });
+  });
+}
+
+async function switchWorkTabLocation(tabId, location, seedUrl = null) {
+  if (location.retailer === 'costco') {
+    if (!seedUrl || retailerFromSupportedUrl(seedUrl) !== 'costco') {
+      throw new Error(`No Costco product page is available to select ${location.name}`);
+    }
+    await chrome.tabs.update(tabId, { url: seedUrl, active: true });
+    await waitForLoad(tabId);
+    await showPopup();
+    await sleep(1800);
+    const verified = await setCostcoWarehouseInTab(tabId, location);
+    if (!verified || String(verified.externalId) !== String(location.externalId)) {
+      throw new Error(`Costco did not verify ${location.name} #${location.externalId}`);
+    }
+    return;
+  }
   if (location.retailer !== 'samsclub') {
-    throw new Error(`${location.name} cannot be selected automatically yet; Costco sources use the online listing pass`);
+    throw new Error(`Unsupported purchasing location retailer: ${location.retailer}`);
   }
   await chrome.tabs.update(tabId, {
     url: `https://www.samsclub.com/club/${encodeURIComponent(location.externalId)}`,
@@ -1067,13 +1101,13 @@ function verifiedScrapeContext(scraped, location) {
   const detected = scraped?.vendor_context;
   const detectedId = detected?.externalId ? String(detected.externalId) : '';
   if (detectedId && detectedId !== String(location.externalId)) {
-    throw new Error(`Expected ${location.name} #${location.externalId}, but the page reported club #${detectedId}`);
+    throw new Error(`Expected ${location.name} #${location.externalId}, but the page reported location #${detectedId}`);
   }
   if (!detectedId) {
     const expectedName = String(location.name || '').toLowerCase().replace(/sam['’]?s club/g, '').trim();
     const detectedName = String(detected?.name || '').toLowerCase();
     if (!expectedName || !detectedName.includes(expectedName)) {
-      throw new Error(`Could not verify that the product price belongs to ${location.name}`);
+      throw new Error(`Could not verify that the product page belongs to ${location.name}`);
     }
   }
   return {
@@ -1099,12 +1133,13 @@ async function inferRemainingOffers(settings, sourceLocationId, targetLocationId
   return data;
 }
 
-async function runCatalogUpdate(locationIds = []) {
+async function runCatalogUpdate(locationIds = [], retailer = null) {
   const settings = await getSettings();
   const refreshRunId = `refresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   await setProgress({
     running: true, done: false, canceling: false, phase: 'loading',
+    retailer,
     total: 0, processed: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0,
     aiUsed: 0, aiReused: 0, aiIncomplete: 0,
     aiCalls: 0, aiInputTokens: 0, aiOutputTokens: 0, aiReasoningTokens: 0,
@@ -1152,7 +1187,7 @@ async function runCatalogUpdate(locationIds = []) {
     allLocations,
     selectedLocations,
     requested.size > 0
-  );
+  ).filter((pass) => !retailer || pass.retailer === retailer);
 
   const passWork = [];
   try {
@@ -1190,7 +1225,9 @@ async function runCatalogUpdate(locationIds = []) {
       if (cancelRequested) break;
       const pass = passWork[passIndex];
       const location = pass.location;
-      if (location) await switchWorkTabLocation(tabId, location);
+      if (location) {
+        await switchWorkTabLocation(tabId, location, pass.targets[0]?.vendorLink || null);
+      }
       const existingPrimary = location ? primaryByRetailer.get(pass.retailer) : null;
       const isSecondaryLocation = Boolean(location && existingPrimary);
       const primaryState = location
