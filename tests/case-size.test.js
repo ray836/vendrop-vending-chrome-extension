@@ -20,6 +20,7 @@ assert.equal(
 assert.equal(context.extractCaseSizeFromText('Cookies, 1.5 oz., 30 pk.'), '30');
 assert.equal(context.extractCaseSizeFromText('Pop-Tarts Toaster Pastries Variety Pack, 48 ct.'), '48');
 assert.equal(context.extractCaseSizeFromText('Widgets, 4 piece, 24 count'), '24');
+assert.equal(context.extractCaseSizeFromText('Cheez-It Crackers, Cheddar, 1.5 oz, 45-count'), '45');
 assert.equal(context.extractCaseSizeFromText('No package quantity here'), null);
 
 console.log('case size fixture passed');

@@ -105,7 +105,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === 'CANCEL_CART_PLACEMENT') {
-    cancelCartPlacement(request.orderId).then(sendResponse);
+    cancelCartPlacement(request.orderId, request.retailer).then(sendResponse);
     return true;
   }
 
@@ -255,7 +255,24 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ===== Sam's Club order cart placement =====
+const CART_RETAILERS = {
+  samsclub: {
+    name: "Sam's Club",
+    hostname: 'samsclub.com',
+    cartUrl: 'https://www.samsclub.com/cart',
+  },
+  costco: {
+    name: 'Costco',
+    hostname: 'costco.com',
+    cartUrl: 'https://www.costco.com/CheckoutCartDisplayView',
+  },
+};
+
+function cartRetailerConfig(retailer) {
+  return CART_RETAILERS[retailer] || null;
+}
+
+// ===== Supplier order cart placement =====
 // The VenDrop Orders page supplies a short-lived token scoped to one order.
 // This flow opens one foreground product tab, adds the requested case quantity
 // for each line, confirms the handoff, and deliberately stops on the cart page.
@@ -497,7 +514,11 @@ async function handleStartCartPlacement(payload, sender) {
   const orderId = String(payload?.orderId || '');
   const extensionToken = String(payload?.extensionToken || '');
   const placedAt = String(payload?.placedAt || '');
-  if (!apiBaseUrl || !orderId || !extensionToken || !placedAt) {
+  const retailer = payload?.retailer === 'samsclub' || payload?.retailer === 'costco'
+    ? payload.retailer
+    : null;
+  const retailerConfig = cartRetailerConfig(retailer);
+  if (!apiBaseUrl || !orderId || !extensionToken || !placedAt || !retailerConfig) {
     return { success: false, error: 'Invalid cart placement handoff' };
   }
 
@@ -513,12 +534,20 @@ async function handleStartCartPlacement(payload, sender) {
 
   const current = await getCartPlacementProgress();
   if (cartPlacementRunning || current?.running) {
-    return current?.orderId === orderId
+    return current?.orderId === orderId && current?.retailer === retailer
       ? { success: true, alreadyRunning: true }
       : { success: false, error: 'Another cart placement is already running' };
   }
 
-  const job = { orderId, extensionToken, apiBaseUrl, placedAt };
+  const job = {
+    orderId,
+    extensionToken,
+    apiBaseUrl,
+    placedAt,
+    retailer,
+    retailerName: retailerConfig.name,
+    cartPageUrl: retailerConfig.cartUrl,
+  };
   // Claim the worker synchronously before touching storage so startup
   // reconciliation cannot mistake this brand-new run for an interrupted one.
   cartPlacementRunning = true;
@@ -548,9 +577,13 @@ async function handleStartCartPlacement(payload, sender) {
   return { success: true, started: true };
 }
 
-async function cancelCartPlacement(orderId) {
+async function cancelCartPlacement(orderId, retailer) {
   const current = await getCartPlacementProgress();
-  if (!current?.running || (orderId && current.orderId !== orderId)) {
+  if (
+    !current?.running ||
+    (orderId && current.orderId !== orderId) ||
+    (retailer && current.retailer !== retailer)
+  ) {
     return { success: true, running: false };
   }
   cartPlacementCancelRequested = true;
@@ -576,14 +609,17 @@ async function fetchJson(url, options = {}) {
 
 async function runCartPlacement(job) {
   const authorization = { Authorization: `Bearer ${job.extensionToken}` };
+  const retailerConfig = cartRetailerConfig(job.retailer);
+  if (!retailerConfig) throw new Error('This supplier is not supported for cart placement');
   const cartData = await fetchJson(
-    `${job.apiBaseUrl}/api/orders/next-cart?orderId=${encodeURIComponent(job.orderId)}`,
+    `${job.apiBaseUrl}/api/orders/next-cart?orderId=${encodeURIComponent(job.orderId)}&retailer=${encodeURIComponent(job.retailer)}`,
     { headers: authorization }
   );
   if (!cartData.order) throw new Error('This order is no longer awaiting cart placement');
+  if (cartData.order.retailer !== job.retailer) throw new Error('The cart supplier did not match the requested job');
 
   const items = cartData.order.items || [];
-  if (!items.length) throw new Error('The order has no items');
+  if (!items.length) throw new Error(`The order has no ${retailerConfig.name} items`);
   for (const item of items) {
     let vendorHostname = '';
     try {
@@ -591,9 +627,9 @@ async function runCartPlacement(job) {
     } catch (e) {
       // Handled by the validation below.
     }
-    const isSamsClub = vendorHostname === 'samsclub.com' || vendorHostname.endsWith('.samsclub.com');
-    if (item.vendor !== 'samsclub' || !isSamsClub) {
-      throw new Error(`${item.name || 'An item'} does not have a Sam's Club product link`);
+    const isExpectedRetailer = vendorHostname === retailerConfig.hostname || vendorHostname.endsWith(`.${retailerConfig.hostname}`);
+    if (item.vendor !== job.retailer || !isExpectedRetailer) {
+      throw new Error(`${item.name || 'An item'} does not have a ${retailerConfig.name} product link`);
     }
     if (!Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 50) {
       throw new Error(`${item.name || 'An item'} has an unsupported case quantity`);
@@ -604,7 +640,7 @@ async function runCartPlacement(job) {
   const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
   await patchCartPlacementProgress({ workTabId: tab.id });
 
-  await navigateCartTab(tab.id, 'https://www.samsclub.com/cart');
+  await navigateCartTab(tab.id, retailerConfig.cartUrl);
   await patchCartPlacementProgress({
     phase: 'clearing-cart',
     currentName: '',
@@ -612,7 +648,7 @@ async function runCartPlacement(job) {
   });
   await showPopup();
   await sleep(400);
-  const clearResult = await clearSamsCartInTab(tab.id);
+  const clearResult = await clearVendorCartInTab(tab.id, job.retailer);
   await patchCartPlacementProgress({
     phase: 'cart-cleared',
     removedCartItems: Number(clearResult?.removedLineItems || 0),
@@ -634,7 +670,7 @@ async function runCartPlacement(job) {
     await patchCartPlacementProgress({ phase: 'adding-current-item', currentQuantity: 1 });
     await showPopup();
     await sleep(400); // make the status visible before the first cart click
-    await addProductInTab(tab.id, { ...item, quantity: 1 });
+    await addProductInTab(tab.id, { ...item, quantity: 1 }, job.retailer);
     await patchCartPlacementProgress({ phase: 'item-complete', processed: index + 1 });
     await chrome.action.setBadgeBackgroundColor({ color: '#2563eb' });
     await chrome.action.setBadgeText({ text: `${index + 1}/${items.length}` });
@@ -646,11 +682,11 @@ async function runCartPlacement(job) {
     currentName: '',
     currentQuantity: null,
   });
-  await navigateCartTab(tab.id, 'https://www.samsclub.com/cart');
+  await navigateCartTab(tab.id, retailerConfig.cartUrl);
   await patchCartPlacementProgress({ phase: 'updating-quantities' });
   await showPopup();
   await sleep(400);
-  const quantityResult = await setCartQuantitiesInTab(tab.id, items);
+  const quantityResult = await setCartQuantitiesInTab(tab.id, items, job.retailer);
   await patchCartPlacementProgress({
     phase: 'quantities-updated',
     totalCases: Number(quantityResult?.totalCases || 0),
@@ -661,7 +697,7 @@ async function runCartPlacement(job) {
   if (cartPlacementCancelRequested) throw new Error('Cart placement was canceled');
   await patchCartPlacementProgress({ phase: 'confirming', currentName: '' });
   try {
-    await fetchJson(`${job.apiBaseUrl}/api/orders/${encodeURIComponent(job.orderId)}/confirm-placed`, {
+    await fetchJson(`${job.apiBaseUrl}/api/orders/${encodeURIComponent(job.orderId)}/confirm-placed?retailer=${encodeURIComponent(job.retailer)}`, {
       method: 'POST',
       headers: authorization,
     });
@@ -689,9 +725,13 @@ async function failCartPlacement(job, error) {
   const message = String(error?.message || error || 'Cart placement failed');
   console.error('[VenDrop] Cart placement failed:', message);
   try {
-    await fetch(`${job.apiBaseUrl}/api/orders/${encodeURIComponent(job.orderId)}/cancel-placing`, {
+    await fetch(`${job.apiBaseUrl}/api/orders/${encodeURIComponent(job.orderId)}/cancel-placing?retailer=${encodeURIComponent(job.retailer)}`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${job.extensionToken}` },
+      headers: {
+        Authorization: `Bearer ${job.extensionToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ error: message }),
     });
   } catch (cancelError) {
     console.warn('[VenDrop] Could not return order to draft:', cancelError);
@@ -716,16 +756,17 @@ async function navigateCartTab(tabId, url) {
   await sleep(1800);
 }
 
-function addProductInTab(tabId, item) {
+function addProductInTab(tabId, item, retailer) {
   return new Promise((resolve, reject) => {
     const attempt = (remaining) => {
       chrome.tabs.sendMessage(
         tabId,
-        { type: 'ADD_CURRENT_PRODUCT_TO_CART', quantity: item.quantity, expectedName: item.name },
+        { type: 'ADD_CURRENT_PRODUCT_TO_CART', retailer, quantity: item.quantity, expectedName: item.name },
         (response) => {
           if (chrome.runtime.lastError || !response) {
             if (remaining > 1) return setTimeout(() => attempt(remaining - 1), 1000);
-            return reject(new Error(chrome.runtime.lastError?.message || 'Sam\'s Club page did not respond'));
+            const siteName = cartRetailerConfig(retailer)?.name || 'Supplier';
+            return reject(new Error(chrome.runtime.lastError?.message || `${siteName} page did not respond`));
           }
           if (!response.success) return reject(new Error(response.error || `Could not add ${item.name}`));
           resolve(response);
@@ -736,15 +777,17 @@ function addProductInTab(tabId, item) {
   });
 }
 
-function clearSamsCartInTab(tabId) {
+function clearVendorCartInTab(tabId, retailer) {
   return new Promise((resolve, reject) => {
     const attempt = (remaining) => {
-      chrome.tabs.sendMessage(tabId, { type: 'CLEAR_SAMS_CART' }, (response) => {
+      chrome.tabs.sendMessage(tabId, { type: 'CLEAR_VENDOR_CART', retailer }, (response) => {
         if (chrome.runtime.lastError || !response) {
           if (remaining > 1) return setTimeout(() => attempt(remaining - 1), 1000);
-          return reject(new Error(chrome.runtime.lastError?.message || 'Sam\'s Club cart did not respond'));
+          const siteName = cartRetailerConfig(retailer)?.name || 'Supplier';
+          return reject(new Error(chrome.runtime.lastError?.message || `${siteName} cart did not respond`));
         }
-        if (!response.success) return reject(new Error(response.error || 'Could not clear the Sam\'s Club cart'));
+        const siteName = cartRetailerConfig(retailer)?.name || 'supplier';
+        if (!response.success) return reject(new Error(response.error || `Could not clear the ${siteName} cart`));
         resolve(response);
       });
     };
@@ -752,16 +795,18 @@ function clearSamsCartInTab(tabId) {
   });
 }
 
-function setCartQuantitiesInTab(tabId, items) {
+function setCartQuantitiesInTab(tabId, items, retailer) {
   return new Promise((resolve, reject) => {
     // Do not replay this message: a lost response could happen after some plus
     // buttons were already clicked. The next explicit run starts by clearing the
     // cart, which is safer than risking duplicate quantity increments here.
-    chrome.tabs.sendMessage(tabId, { type: 'SET_SAMS_CART_QUANTITIES', items }, (response) => {
+    chrome.tabs.sendMessage(tabId, { type: 'SET_VENDOR_CART_QUANTITIES', retailer, items }, (response) => {
       if (chrome.runtime.lastError || !response) {
-        return reject(new Error(chrome.runtime.lastError?.message || 'Sam\'s Club cart did not respond'));
+        const siteName = cartRetailerConfig(retailer)?.name || 'Supplier';
+        return reject(new Error(chrome.runtime.lastError?.message || `${siteName} cart did not respond`));
       }
-      if (!response.success) return reject(new Error(response.error || 'Could not set the Sam\'s Club cart quantities'));
+      const siteName = cartRetailerConfig(retailer)?.name || 'supplier';
+      if (!response.success) return reject(new Error(response.error || `Could not set the ${siteName} cart quantities`));
       resolve(response);
     });
   });
@@ -1911,9 +1956,13 @@ async function postProduct(settings, scraped, url) {
     // and leave the partial cart visible for explicit user review.
     try {
       if (cart.extensionToken && cart.apiBaseUrl && cart.orderId) {
-        await fetch(`${cart.apiBaseUrl}/api/orders/${encodeURIComponent(cart.orderId)}/cancel-placing`, {
+        await fetch(`${cart.apiBaseUrl}/api/orders/${encodeURIComponent(cart.orderId)}/cancel-placing?retailer=${encodeURIComponent(cart.retailer || '')}`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${cart.extensionToken}` },
+          headers: {
+            Authorization: `Bearer ${cart.extensionToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ error: 'Chrome interrupted cart placement' }),
         });
       }
     } catch (e) {
@@ -1924,7 +1973,7 @@ async function postProduct(settings, scraped, url) {
       done: true,
       interrupted: true,
       phase: 'failed',
-      error: 'Chrome interrupted cart placement. Review the partial Sam\'s Club cart before trying again.',
+      error: `Chrome interrupted cart placement. Review the partial ${cart.retailerName || 'supplier'} cart before trying again.`,
       currentName: '',
       extensionToken: null,
       finishedAt: Date.now(),

@@ -54,6 +54,7 @@ const editBtn = document.getElementById('edit-btn');
 const btnText = document.getElementById('btn-text');
 const btnSpinner = document.getElementById('btn-spinner');
 const statusMessage = document.getElementById('status-message');
+const viewProductLink = document.getElementById('view-product-link');
 const analysisIndicator = document.getElementById('analysis-indicator');
 const retailerBadge = document.getElementById('retailer-badge');
 const pageStatus = document.getElementById('page-status');
@@ -316,12 +317,16 @@ function getCartPlacementProgress() {
 
 function renderCartPlacement(progress) {
   latestCartPlacement = progress;
+  const retailerName = progress?.retailerName || (progress?.retailer === 'costco' ? 'Costco' : "Sam's Club");
+  const cartPageUrl = progress?.cartPageUrl || (progress?.retailer === 'costco'
+    ? 'https://www.costco.com/CheckoutCartDisplayView'
+    : 'https://www.samsclub.com/cart');
   const phases = {
     'loading-order': 'Loading order details…',
-    'opening-cart-to-clear': 'Opening your existing Sam\'s Club cart…',
+    'opening-cart-to-clear': `Opening your existing ${retailerName} cart…`,
     'clearing-cart': 'Removing existing cart items…',
     'cart-cleared': 'Existing cart cleared',
-    'adding-items': 'Adding cases to Sam\'s Club…',
+    'adding-items': `Adding cases to ${retailerName}…`,
     'opening-product': 'Opening the next product page…',
     'adding-current-item': 'Adding this product…',
     'item-complete': 'Product added to the cart',
@@ -329,14 +334,14 @@ function renderCartPlacement(progress) {
     'updating-quantities': 'Setting final case quantities…',
     'quantities-updated': 'Case quantities updated',
     confirming: 'Finishing the cart handoff…',
-    'opening-cart': 'Opening your Sam\'s Club cart…',
+    'opening-cart': `Opening your ${retailerName} cart…`,
     complete: 'Cart ready',
     canceling: 'Canceling…',
     canceled: 'Cart placement canceled',
     failed: 'Cart placement stopped',
   };
-  orderStatusTitle.textContent = progress?.running ? 'Sam\'s Club cart in progress' : (phases[progress?.phase] || 'Sam\'s Club ordering');
-  orderStatusMessage.textContent = progress?.error || phases[progress?.phase] || 'Click Add to Sam\'s Cart on the Orders page to begin.';
+  orderStatusTitle.textContent = progress?.running ? `${retailerName} cart in progress` : (phases[progress?.phase] || `${retailerName} ordering`);
+  orderStatusMessage.textContent = progress?.error || phases[progress?.phase] || `Click Add to ${retailerName} Cart on the Orders page to begin.`;
 
   const total = Number(progress?.total || 0);
   const processed = Number(progress?.processed || 0);
@@ -360,29 +365,39 @@ function renderCartPlacement(progress) {
     : (phases[progress?.phase] || '');
   cancelOrderBtn.classList.toggle('hidden', !progress?.running);
   cancelOrderBtn.dataset.orderId = progress?.orderId || '';
+  cancelOrderBtn.dataset.retailer = progress?.retailer || '';
   openCartLink.classList.toggle('hidden', progress?.phase !== 'complete');
+  openCartLink.href = cartPageUrl;
+  openCartLink.textContent = `Open ${retailerName} Cart`;
 }
 
 openCartLink.addEventListener('click', async (event) => {
   event.preventDefault();
+  const cartPageUrl = latestCartPlacement?.cartPageUrl || (latestCartPlacement?.retailer === 'costco'
+    ? 'https://www.costco.com/CheckoutCartDisplayView'
+    : 'https://www.samsclub.com/cart');
   const tabId = latestCartPlacement?.workTabId;
   if (tabId != null) {
     try {
-      await chrome.tabs.update(tabId, { url: 'https://www.samsclub.com/cart', active: true });
+      await chrome.tabs.update(tabId, { url: cartPageUrl, active: true });
       window.close();
       return;
     } catch (error) {
       // The work tab may have been closed; fall through and open a new cart tab.
     }
   }
-  await chrome.tabs.create({ url: 'https://www.samsclub.com/cart', active: true });
+  await chrome.tabs.create({ url: cartPageUrl, active: true });
   window.close();
 });
 
 cancelOrderBtn.addEventListener('click', async () => {
   const orderId = cancelOrderBtn.dataset.orderId;
   if (!orderId) return;
-  await chrome.runtime.sendMessage({ type: 'CANCEL_CART_PLACEMENT', orderId });
+  await chrome.runtime.sendMessage({
+    type: 'CANCEL_CART_PLACEMENT',
+    orderId,
+    retailer: cancelOrderBtn.dataset.retailer || null,
+  });
   renderCartPlacement(await getCartPlacementProgress());
 });
 
@@ -503,6 +518,7 @@ function showProductPreview(productData) {
     previewPrice.textContent = `$${productData.case_cost}`;
   }
   productPreview.classList.remove('hidden');
+  showCatalogProductLink(null);
   assortmentPreview.classList.add('hidden');
   analysisIndicator.classList.add('hidden');
 }
@@ -582,6 +598,18 @@ function buildProductDetailUrl(standardProductId, reviewAssortment = false) {
   } catch {
     return null;
   }
+}
+
+function showCatalogProductLink(product) {
+  const detailUrl = buildProductDetailUrl(product?.id);
+  if (!detailUrl) {
+    viewProductLink.removeAttribute('href');
+    viewProductLink.classList.add('hidden');
+    return;
+  }
+
+  viewProductLink.href = detailUrl;
+  viewProductLink.classList.remove('hidden');
 }
 
 // Populate edit form with product data
@@ -749,6 +777,7 @@ async function saveProduct(productData) {
         vendorShippingEligible: productData.vendor_shipping_eligible,
         vendorPickupEligible: productData.vendor_pickup_eligible,
         vendorDeliveryEligible: productData.vendor_delivery_eligible,
+        vendorStatusEvidence: productData.vendor_status_evidence || null,
       })
     });
 
@@ -822,6 +851,7 @@ addProductBtn.addEventListener('click', async () => {
         ? `✓ Refreshed catalog product: ${result.data.product.name}`
         : `✓ Added to catalog: ${result.data.product.name}!`;
     showStatus(msg, 'success');
+    showCatalogProductLink(result.data.product);
     renderAnalysisIndicator(result.data.analysis);
     renderAssortmentPreview(result.data.product);
 
@@ -890,6 +920,7 @@ productForm.addEventListener('submit', async (e) => {
         ? `✓ Refreshed catalog product: ${result.data.product.name}`
         : `✓ Added to catalog: ${result.data.product.name}!`;
     showStatus(msg, 'success', editStatusMessage);
+    showCatalogProductLink(result.data.product);
     renderAnalysisIndicator(result.data.analysis);
     renderAssortmentPreview(result.data.product);
 

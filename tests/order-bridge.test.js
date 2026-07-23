@@ -64,15 +64,18 @@ listeners['vendorpro:place-order']({
     extensionToken: 'token',
     apiBaseUrl: 'http://localhost:3001',
     placedAt: '2026-07-18T00:00:00.000Z',
+    retailer: 'costco',
   },
 });
 
 assert.equal(messages.length, 1);
 assert.equal(messages[0].type, 'START_CART_PLACEMENT');
 assert.equal(messages[0].payload.orderId, 'order-1');
+assert.equal(messages[0].payload.retailer, 'costco');
 assert.equal(dispatched.length, 1);
 assert.equal(dispatched[0].type, 'vendorpro:placement-ack');
 assert.equal(dispatched[0].detail.version, '1.14.1');
+assert.equal(dispatched[0].detail.retailer, 'costco');
 
 listeners['vendorpro:sync-purchase-history']({
   detail: {

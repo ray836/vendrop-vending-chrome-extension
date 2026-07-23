@@ -12,8 +12,11 @@ function normalizePlacement(detail) {
   const extensionToken = String(detail.extensionToken || '');
   const apiBaseUrl = String(detail.apiBaseUrl || window.location.origin);
   const placedAt = String(detail.placedAt || '');
-  if (!orderId || !extensionToken || !placedAt) return null;
-  return { orderId, extensionToken, apiBaseUrl, placedAt };
+  const retailer = detail.retailer === 'samsclub' || detail.retailer === 'costco'
+    ? detail.retailer
+    : null;
+  if (!orderId || !extensionToken || !placedAt || !retailer) return null;
+  return { orderId, extensionToken, apiBaseUrl, placedAt, retailer };
 }
 
 function placementFromNode() {
@@ -24,13 +27,14 @@ function placementFromNode() {
     extensionToken: node.dataset.extensionToken,
     apiBaseUrl: node.dataset.apiBaseUrl,
     placedAt: node.dataset.placedAt,
+    retailer: node.dataset.retailer,
   });
 }
 
 function startPlacement(detail) {
   const payload = normalizePlacement(detail);
   if (!payload) return;
-  const key = `${payload.orderId}:${payload.placedAt}`;
+  const key = `${payload.orderId}:${payload.retailer}:${payload.placedAt}`;
   if (key === lastSignalKey) return;
 
   chrome.runtime.sendMessage({ type: 'START_CART_PLACEMENT', payload }, (response) => {
@@ -46,6 +50,7 @@ function startPlacement(detail) {
     window.dispatchEvent(new CustomEvent('vendorpro:placement-ack', {
       detail: {
         orderId: payload.orderId,
+        retailer: payload.retailer,
         version: chrome.runtime.getManifest().version,
         alreadyRunning: Boolean(response.alreadyRunning),
       },
@@ -111,7 +116,10 @@ window.addEventListener('vendorpro:sync-purchase-history', (event) => startHisto
 window.addEventListener('vendorpro:get-purchase-history-progress', (event) => requestHistoryProgress(event.detail));
 window.addEventListener('vendorpro:cancel-order', (event) => {
   const orderId = String(event.detail?.orderId || '');
-  if (orderId) chrome.runtime.sendMessage({ type: 'CANCEL_CART_PLACEMENT', orderId });
+  const retailer = event.detail?.retailer === 'samsclub' || event.detail?.retailer === 'costco'
+    ? event.detail.retailer
+    : null;
+  if (orderId) chrome.runtime.sendMessage({ type: 'CANCEL_CART_PLACEMENT', orderId, retailer });
 });
 
 chrome.runtime.onMessage.addListener((message) => {

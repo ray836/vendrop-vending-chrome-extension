@@ -49,7 +49,7 @@
       <!-- Order automation status (shown on VenDrop or while a cart job runs) -->
       <div id="order-view" class="view hidden">
         <div class="info-box">
-          <p><strong id="order-status-title">Sam's Club ordering</strong></p>
+          <p><strong id="order-status-title">Supplier ordering</strong></p>
           <p id="order-status-message">Waiting for an order…</p>
         </div>
         <div id="order-progress-wrap" class="hidden">
@@ -60,7 +60,7 @@
           <p id="order-current-name" class="update-current"></p>
           <p id="order-current-action" class="order-current-action"></p>
         </div>
-        <a id="open-cart-link" class="btn btn-primary btn-block hidden" href="https://www.samsclub.com/cart">Open Sam's Club Cart</a>
+        <a id="open-cart-link" class="btn btn-primary btn-block hidden" href="#">Open Supplier Cart</a>
         <button id="cancel-order-btn" class="btn btn-secondary hidden">Cancel cart placement</button>
         <p class="field-hint">The extension adds cases only. Checkout and payment stay manual.</p>
       </div>
@@ -113,6 +113,16 @@
         </div>
 
         <div id="status-message" class="hidden"></div>
+        <a
+          id="view-product-link"
+          class="catalog-product-link hidden"
+          href="#"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <span>View in Simple Vending</span>
+          <span aria-hidden="true">↗</span>
+        </a>
         <div id="analysis-indicator" class="analysis-indicator hidden"></div>
 
         <div class="settings-link">

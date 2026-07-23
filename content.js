@@ -21,19 +21,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
   if (request.type === 'ADD_CURRENT_PRODUCT_TO_CART') {
-    addCurrentSamsProductToCart(request.quantity)
+    addCurrentProductToCart(request.retailer, request.quantity)
       .then((result) => sendResponse({ success: true, ...result }))
       .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
     return true;
   }
-  if (request.type === 'CLEAR_SAMS_CART') {
-    clearCurrentSamsCart()
+  if (request.type === 'CLEAR_VENDOR_CART' || request.type === 'CLEAR_SAMS_CART') {
+    clearCurrentVendorCart(request.retailer || 'samsclub')
       .then((result) => sendResponse({ success: true, ...result }))
       .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
     return true;
   }
-  if (request.type === 'SET_SAMS_CART_QUANTITIES') {
-    setCurrentSamsCartQuantities(request.items)
+  if (request.type === 'SET_VENDOR_CART_QUANTITIES' || request.type === 'SET_SAMS_CART_QUANTITIES') {
+    setCurrentVendorCartQuantities(request.retailer || 'samsclub', request.items)
       .then((result) => sendResponse({ success: true, ...result }))
       .catch((error) => sendResponse({ success: false, error: String(error?.message || error) }));
     return true;
@@ -154,13 +154,42 @@ async function setCurrentSamsClub(location) {
   return { ...location, ...context, externalId: expectedId, fulfillmentMode: 'pickup' };
 }
 
+const CART_RETAILER_PAGES = {
+  samsclub: { name: "Sam's Club", hostname: 'samsclub.com', cartPath: /^\/cart(?:\/|$)/i },
+  // Costco currently redirects /CheckoutCartView to
+  // /CheckoutCartDisplayView?catalogId=...&storeId=.... Accept both routes so
+  // automation keeps running after the redirect.
+  costco: { name: 'Costco', hostname: 'costco.com', cartPath: /^\/CheckoutCart(?:Display)?View(?:\/|$)/i },
+};
+
+function cartRetailerPage(retailer) {
+  return CART_RETAILER_PAGES[retailer] || null;
+}
+
+function isRetailerHost(retailer) {
+  const config = cartRetailerPage(retailer);
+  const hostname = window.location.hostname.toLowerCase();
+  return Boolean(config && (hostname === config.hostname || hostname.endsWith(`.${config.hostname}`)));
+}
+
+function requireRetailerPage(retailer, requireCart = false) {
+  const config = cartRetailerPage(retailer);
+  if (!config || !isRetailerHost(retailer) || (requireCart && !config.cartPath.test(window.location.pathname))) {
+    const siteName = config?.name || 'supported supplier';
+    throw new Error(`Open the ${siteName}${requireCart ? ' cart' : ' product page'} before continuing`);
+  }
+  return config;
+}
+
 function cartItemCount() {
-  const candidates = Array.from(document.querySelectorAll('h1, h2, button[aria-label], [aria-label*="cart" i]'));
+  const candidates = Array.from(document.querySelectorAll('h1, h2, button[aria-label], [aria-label*="cart" i], a[href*="Cart" i]'));
   for (const element of candidates) {
     const label = buttonLabel(element);
     const patterns = [
       /\bcart\s*\((\d+)\s+items?\)/i,
       /\bcart contains\s+(\d+)\s+items?\b/i,
+      /\b(\d+)\s+items?\s+cart\b/i,
+      /\bcart\s*\((\d+)\)/i,
     ];
     for (const pattern of patterns) {
       const match = label.match(pattern);
@@ -175,7 +204,8 @@ function findCartRemoveControls(root = document) {
     const labels = [control.getAttribute('aria-label'), control.getAttribute('title'), control.textContent]
       .filter(Boolean)
       .map((label) => String(label).replace(/\s+/g, ' ').trim());
-    return labels.some((label) => /^remove$/i.test(label)) && isVisible(control) && !control.disabled;
+    return labels.some((label) => /^(?:remove|delete)(?:\s+(?:item|product).*)?$/i.test(label)) &&
+      isVisible(control) && !control.disabled;
   });
 }
 
@@ -183,7 +213,11 @@ function findRemoveConfirmation() {
   const dialogs = Array.from(document.querySelectorAll('[role="dialog"], dialog'))
     .filter((dialog) => isVisible(dialog));
   for (const dialog of dialogs) {
-    const controls = findCartRemoveControls(dialog);
+    const controls = Array.from(dialog.querySelectorAll('button, a')).filter((control) => {
+      const label = buttonLabel(control);
+      return isVisible(control) && !control.disabled &&
+        /^(?:yes,?\s*)?(?:remove|delete)(?:\s+(?:item|product).*)?$/i.test(label);
+    });
     if (controls.length === 1) return controls[0];
   }
   return null;
@@ -194,7 +228,7 @@ function cartLooksEmpty() {
   if (count === 0) return true;
   const cartRegion = document.querySelector('main, [role="main"], [aria-label="Cart" i]') || document.body;
   const text = (cartRegion?.innerText || cartRegion?.textContent || '').replace(/\s+/g, ' ');
-  return /\bcart\s*\(0\s+items?\)|\byour cart is empty\b|\ba full cart is a happy cart\b/i.test(text);
+  return /\bcart\s*\(0\s+items?\)|\byour (?:shopping )?cart is empty\b|\ba full cart is a happy cart\b/i.test(text);
 }
 
 async function waitForCartState(timeoutMs = 12000) {
@@ -207,7 +241,7 @@ async function waitForCartState(timeoutMs = 12000) {
   return findCartRemoveControls();
 }
 
-async function waitForRemoval(clickedControl, previousCount, timeoutMs = 10000) {
+async function waitForRemoval(clickedControl, previousCount, retailer, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
   let confirmationClicked = false;
   while (Date.now() < deadline) {
@@ -224,7 +258,8 @@ async function waitForRemoval(clickedControl, previousCount, timeoutMs = 10000) 
     if (!clickedControl.isConnected || remaining.length < previousCount || cartLooksEmpty()) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error('Sam\'s Club did not remove an existing cart item');
+  const siteName = cartRetailerPage(retailer)?.name || 'Supplier';
+  throw new Error(`${siteName} did not remove an existing cart item`);
 }
 
 async function waitForVerifiedEmpty(timeoutMs = 8000) {
@@ -238,10 +273,8 @@ async function waitForVerifiedEmpty(timeoutMs = 8000) {
   return false;
 }
 
-async function clearCurrentSamsCart() {
-  if (!window.location.hostname.endsWith('samsclub.com') || !window.location.pathname.startsWith('/cart')) {
-    throw new Error('Open the Sam\'s Club cart before clearing it');
-  }
+async function clearCurrentVendorCart(retailer) {
+  const config = requireRetailerPage(retailer, true);
 
   await waitForCartState();
   let removedLineItems = 0;
@@ -249,7 +282,7 @@ async function clearCurrentSamsCart() {
     if (cartLooksEmpty()) break;
     const controls = findCartRemoveControls();
     if (!controls.length) {
-      // Sam's Club re-renders each fulfillment group asynchronously. Check a
+      // Retailer carts re-render each fulfillment group asynchronously. Check a
       // second time before declaring the cart empty.
       await new Promise((resolve) => setTimeout(resolve, 700));
       const settledControls = findCartRemoveControls();
@@ -261,15 +294,21 @@ async function clearCurrentSamsCart() {
     if (!control) break;
     const previousCount = currentControls.length;
     control.click();
-    await waitForRemoval(control, previousCount);
+    await waitForRemoval(control, previousCount, retailer);
     removedLineItems += 1;
   }
 
   if (!await waitForVerifiedEmpty()) {
-    throw new Error('Could not verify that the Sam\'s Club cart is empty');
+    throw new Error(`Could not verify that the ${config.name} cart is empty`);
   }
 
   return { removedLineItems };
+}
+
+// Kept for older extension fixtures and any in-flight messages from the prior
+// service-worker build.
+function clearCurrentSamsCart() {
+  return clearCurrentVendorCart('samsclub');
 }
 
 function normalizeProductName(value) {
@@ -294,6 +333,18 @@ function samsProductId(value) {
   }
   const decodedMatch = decoded.match(/\/(?:p|ip)\/[^/?#]+\/(\d{6,})/i);
   return decodedMatch ? decodedMatch[1] : null;
+}
+
+function costcoProductId(value) {
+  const text = String(value || '');
+  const pathMatch = text.match(/\/(\d{6,})(?:[/?#.]|$)/);
+  if (pathMatch) return pathMatch[1];
+  const legacyMatch = text.match(/\.product\.(\d{6,})\.html/i);
+  return legacyMatch ? legacyMatch[1] : null;
+}
+
+function cartProductId(value, retailer) {
+  return retailer === 'costco' ? costcoProductId(value) : samsProductId(value);
 }
 
 function parsedHistoryDate(text) {
@@ -397,6 +448,7 @@ function findIncreaseQuantityButton(root = document) {
     'button[data-automation-id="increase-quantity"]',
     'button[data-automation-id="increment-quantity"]',
     'button[data-testid="increase-quantity"]',
+    'button[data-testid*="qty-increase" i]',
     'button[aria-label*="Increase quantity" i]',
     'button[aria-label*="Increment" i]',
     'button[aria-label*="Add one" i]',
@@ -416,13 +468,36 @@ function findIncreaseQuantityButton(root = document) {
   }) || null;
 }
 
-function findCartRowForItem(item) {
-  const expectedId = samsProductId(item?.vendorLink);
+function findQuantityValueControl(root = document) {
+  const selectors = [
+    'input[name*="quantity" i]',
+    'input[aria-label*="quantity" i]',
+    'input[data-testid*="quantity" i]',
+    'select[name*="quantity" i]',
+    'select[aria-label*="quantity" i]',
+    'select[data-testid*="quantity" i]',
+  ];
+  for (const selector of selectors) {
+    const control = root.querySelector(selector);
+    if (control && isVisible(control) && !control.disabled) return control;
+  }
+  return null;
+}
+
+function displayedQuantity(root) {
+  const control = findQuantityValueControl(root);
+  if (!control) return null;
+  const value = Number(control.value || control.getAttribute('value'));
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function findCartRowForItem(item, retailer = 'samsclub') {
+  const expectedId = cartProductId(item?.vendorLink, retailer);
   const expectedName = normalizeProductName(item?.name);
   const links = Array.from(document.querySelectorAll('a[href]'));
   const linkCandidates = links.filter((link) => {
     const href = link.getAttribute('href') || link.href || '';
-    if (expectedId && samsProductId(href) === expectedId) return true;
+    if (expectedId && cartProductId(href, retailer) === expectedId) return true;
     const linkName = normalizeProductName(link.textContent || link.getAttribute('aria-label'));
     return expectedName && linkName && (
       linkName === expectedName || linkName.includes(expectedName) || expectedName.includes(linkName)
@@ -441,11 +516,41 @@ function findCartRowForItem(item) {
   for (const candidate of candidates) {
     let row = candidate;
     while (row && row !== document.body) {
-      if (findIncreaseQuantityButton(row)) return row;
+      if (findIncreaseQuantityButton(row) || findQuantityValueControl(row)) return row;
       row = row.parentElement;
     }
   }
   return null;
+}
+
+async function waitForDisplayedQuantity(item, retailer, expected, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const row = findCartRowForItem(item, retailer);
+    if (row && displayedQuantity(row) === expected) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+async function waitForStableDisplayedQuantity(item, retailer, expected, stableMs = 2000, timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs;
+  let matchedAt = null;
+  while (Date.now() < deadline) {
+    const row = findCartRowForItem(item, retailer);
+    const quantity = row ? displayedQuantity(row) : null;
+    if (quantity === expected) {
+      matchedAt ??= Date.now();
+      if (Date.now() - matchedAt >= stableMs) return true;
+    } else if (matchedAt !== null) {
+      // Costco can optimistically render an increment, roll it back, and then
+      // apply the still-pending server result. Keep observing instead of
+      // immediately sending another competing increment.
+      matchedAt = null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
 }
 
 async function waitForCartItemCount(expected, timeoutMs = 10000) {
@@ -457,10 +562,8 @@ async function waitForCartItemCount(expected, timeoutMs = 10000) {
   return false;
 }
 
-async function setCurrentSamsCartQuantities(items) {
-  if (!window.location.hostname.endsWith('samsclub.com') || !window.location.pathname.startsWith('/cart')) {
-    throw new Error('Open the Sam\'s Club cart before setting quantities');
-  }
+async function setCurrentVendorCartQuantities(retailer, items) {
+  const config = requireRetailerPage(retailer, true);
   if (!Array.isArray(items) || !items.length) throw new Error('No cart quantities were provided');
 
   const desiredItems = items.map((item) => ({
@@ -475,37 +578,97 @@ async function setCurrentSamsCartQuantities(items) {
   }
 
   const initialTotal = desiredItems.length;
-  if (!await waitForCartItemCount(initialTotal, 12000)) {
+  if (retailer === 'samsclub' && !await waitForCartItemCount(initialTotal, 12000)) {
     throw new Error(`Expected ${initialTotal} products in the clean cart before setting quantities`);
   }
 
   let currentTotal = initialTotal;
   for (const item of desiredItems) {
+    if (!findCartRowForItem(item, retailer)) {
+      throw new Error(`Could not find ${item.name} in the ${config.name} cart`);
+    }
+
+    if (retailer === 'costco') {
+      let settled = false;
+      const maxAttempts = Math.max(8, item.quantity * 2);
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const row = findCartRowForItem(item, retailer);
+        const currentQuantity = row ? displayedQuantity(row) : null;
+        if (!Number.isInteger(currentQuantity)) {
+          throw new Error(`Could not read the quantity for ${item.name}`);
+        }
+        if (currentQuantity > item.quantity) {
+          throw new Error(`${item.name} has more cases than requested in the ${config.name} cart`);
+        }
+        if (currentQuantity === item.quantity) {
+          settled = await waitForStableDisplayedQuantity(item, retailer, item.quantity);
+          if (settled) break;
+          continue;
+        }
+
+        const increase = findIncreaseQuantityButton(row);
+        if (!increase) throw new Error(`Could not find the quantity control for ${item.name}`);
+        const nextQuantity = currentQuantity + 1;
+        increase.click();
+        if (!await waitForDisplayedQuantity(item, retailer, nextQuantity)) {
+          throw new Error(`${config.name} did not update the quantity for ${item.name}`);
+        }
+      }
+      if (!settled) {
+        throw new Error(`${config.name} did not keep ${item.quantity} cases of ${item.name} in the cart`);
+      }
+      continue;
+    }
+
     for (let quantity = 1; quantity < item.quantity; quantity++) {
-      const row = findCartRowForItem(item);
+      const row = findCartRowForItem(item, retailer);
       const increase = row && findIncreaseQuantityButton(row);
       if (!increase) throw new Error(`Could not find the quantity control for ${item.name}`);
       increase.click();
       currentTotal += 1;
       if (!await waitForCartItemCount(currentTotal)) {
-        throw new Error(`Sam\'s Club did not update the quantity for ${item.name}`);
+        throw new Error(`${config.name} did not update the quantity for ${item.name}`);
       }
     }
   }
 
   const expectedTotal = desiredItems.reduce((total, item) => total + item.quantity, 0);
-  if (cartItemCount() !== expectedTotal) {
-    throw new Error(`Expected ${expectedTotal} total cases in the Sam\'s Club cart`);
+  const visibleCartTotal = cartItemCount();
+  if (visibleCartTotal !== null && visibleCartTotal !== expectedTotal) {
+    throw new Error(`Expected ${expectedTotal} total cases in the ${config.name} cart`);
   }
   return { totalCases: expectedTotal, productCount: desiredItems.length };
 }
 
+function setCurrentSamsCartQuantities(items) {
+  return setCurrentVendorCartQuantities('samsclub', items);
+}
+
 function findAddToCartButton() {
-  const direct = document.querySelector('button[data-automation-id="atc"]');
-  if (direct && isVisible(direct) && !direct.disabled) return direct;
+  const directSelectors = [
+    'button[data-automation-id="atc"]',
+    'button[data-testid="Button_addToCartDrawer_pdp"]',
+    'button[data-testid*="addToCart" i]',
+  ];
+  for (const selector of directSelectors) {
+    const direct = document.querySelector(selector);
+    if (direct && isVisible(direct) && !direct.disabled) return direct;
+  }
   return Array.from(document.querySelectorAll('button')).find((button) => {
     const label = buttonLabel(button);
-    return isVisible(button) && !button.disabled && (/^add to cart\b/i.test(label) || /^add\b.*\bto cart\b/i.test(label));
+    const productName = normalizeProductName(document.querySelector('h1')?.textContent);
+    const costcoAddedProduct = normalizeProductName(label.replace(/^add\s+/i, ''));
+    return isVisible(button) && !button.disabled && (
+      /^add to cart\b/i.test(label) ||
+      /^add\b.*\bto cart\b/i.test(label) ||
+      (
+        isRetailerHost('costco') &&
+        /^add\s+\S/i.test(label) &&
+        productName &&
+        costcoAddedProduct &&
+        (costcoAddedProduct.includes(productName) || productName.includes(costcoAddedProduct))
+      )
+    );
   }) || null;
 }
 
@@ -521,10 +684,9 @@ async function waitForCartControl(timeoutMs = 8000) {
   return null;
 }
 
-async function addCurrentSamsProductToCart(quantity) {
-  if (!window.location.hostname.endsWith('samsclub.com')) {
-    throw new Error('This cart flow only supports Sam\'s Club products');
-  }
+async function addCurrentProductToCart(retailer, quantity) {
+  const selectedRetailer = retailer || (isRetailerHost('costco') ? 'costco' : 'samsclub');
+  const config = requireRetailerPage(selectedRetailer);
   const requested = Number(quantity);
   if (!Number.isInteger(requested) || requested < 1 || requested > 50) {
     throw new Error('Invalid case quantity');
@@ -533,7 +695,7 @@ async function addCurrentSamsProductToCart(quantity) {
   const addButton = findAddToCartButton();
   if (!addButton) {
     const unavailable = /out of stock|not available|sold out/i.test(document.body.innerText);
-    throw new Error(unavailable ? 'This item is unavailable at Sam\'s Club' : 'Could not find the Add to Cart button');
+    throw new Error(unavailable ? `This item is unavailable at ${config.name}` : 'Could not find the Add to Cart button');
   }
 
   addButton.click();
@@ -544,9 +706,13 @@ async function addCurrentSamsProductToCart(quantity) {
     control.click();
   }
 
-  // Give Sam's cart state time to persist before the work tab navigates away.
+  // Give the retailer cart state time to persist before the work tab navigates away.
   await new Promise((resolve) => setTimeout(resolve, 1200));
   return { quantityAdded: requested };
+}
+
+function addCurrentSamsProductToCart(quantity) {
+  return addCurrentProductToCart('samsclub', quantity);
 }
 
 /**
@@ -563,7 +729,10 @@ function extractCaseSizeFromText(text) {
   if (!text) return null;
 
   const candidates = [];
-  const pattern = /(\d+)\s*(pk|pack|ct|count|pc|piece)\b/gi;
+  // Retailers alternate between "45 count", "45-count", and Unicode dash
+  // variants in otherwise identical titles. Treat the separator as formatting,
+  // not as part of the package-count meaning.
+  const pattern = /(\d+)\s*(?:[-\u2010-\u2015]\s*)?(pk|pack|ct|count|pc|piece)\b/gi;
   let match;
   while ((match = pattern.exec(String(text))) !== null) {
     const unit = match[2].toLowerCase();
@@ -891,16 +1060,21 @@ function applyVisibleVendorStatus(productInfo) {
     .replace(/\s+/g, ' ')
     .trim();
 
+  const addButton = findAddToCartButton();
   const unavailableMatch = scopeText.match(/\b(out of stock|sold out|currently unavailable|item is unavailable)\b/i);
-  if (unavailableMatch) {
-    productInfo.vendor_availability = 'out_of_stock';
-    recordVendorStatusEvidence(productInfo, 'availability', {
-      source: 'visible_buy_box', selector: elementDiagnosticSelector(root), text: unavailableMatch[0], value: 'out_of_stock',
-    });
-  } else if (productInfo.vendor_availability === 'unknown' && findAddToCartButton()) {
+  // An enabled purchase control is the strongest current-page signal. Structured
+  // Product data is next. Only use visible unavailable copy as a fallback when
+  // neither has established availability; Costco can render warehouse-specific
+  // unavailable copy alongside an in-stock online offer.
+  if (addButton) {
     productInfo.vendor_availability = 'in_stock';
     recordVendorStatusEvidence(productInfo, 'availability', {
       source: 'add_to_cart_button', selector: elementDiagnosticSelector(root), text: 'Visible enabled Add to Cart button', value: 'in_stock',
+    });
+  } else if (unavailableMatch && productInfo.vendor_availability === 'unknown') {
+    productInfo.vendor_availability = 'out_of_stock';
+    recordVendorStatusEvidence(productInfo, 'availability', {
+      source: 'visible_buy_box', selector: elementDiagnosticSelector(root), text: unavailableMatch[0], value: 'out_of_stock',
     });
   }
 
@@ -1264,7 +1438,9 @@ function collectGalleryImages(heroUrl) {
   // unsupported selector throws, and the throw is swallowed by the caller's catch —
   // which would silently leave the gallery empty all over again.
   document.querySelectorAll('img[alt]').forEach((img) => {
-    if (/^thumbnail image\b/i.test(img.alt)) push(img.src || img.dataset?.src);
+    if (/^(?:thumbnail image|enlarge product preview)\b/i.test(img.alt)) {
+      push(img.src || img.dataset?.src);
+    }
   });
 
   // The main viewer. Its id is hero-image-default-N or hero-image-zoom-N depending on
@@ -1294,7 +1470,9 @@ function collectGalleryImages(heroUrl) {
 // hero of the same photo dedupe to a single entry — and means we store the original
 // rather than a postage stamp.
 function normalizeAssetUrl(url) {
-  return /samsclubimages\.com|walmartimages\.com/.test(url) ? url.split('?')[0] : url;
+  return /samsclubimages\.com|walmartimages\.com|gdx-assets\.costco\.com/.test(url)
+    ? url.split('?')[0]
+    : url;
 }
 
 // Extract Costco product information
