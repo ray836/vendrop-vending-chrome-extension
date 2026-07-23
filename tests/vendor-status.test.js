@@ -36,6 +36,7 @@ function run() {
     body,
     querySelector(selector) {
       if (selector === 'button[data-automation-id="atc"]') return addButton;
+      if (selector === '[data-testid="buy-box"]') return buyBox;
       return null;
     },
     querySelectorAll(selector) {
@@ -81,6 +82,7 @@ function run() {
   assert.equal(visibleEvidence.fields.sale[0].source, 'visible_buy_box');
 
   pageText = '$12.00 This item is sold out Shipping Not available Pickup As soon as today Delivery As soon as 1 hour Add to Cart';
+  addButton.disabled = true;
   const unavailable = {
     vendor_availability: 'unknown',
     vendor_on_sale: false,
@@ -97,6 +99,7 @@ function run() {
   assert.equal(unavailable.vendor_shipping_eligible, false);
   assert.equal(unavailable.vendor_pickup_eligible, true);
   assert.equal(unavailable.vendor_delivery_eligible, true);
+  addButton.disabled = false;
 
   const structured = {
     vendor_availability: 'unknown',
@@ -129,6 +132,12 @@ function run() {
     vendor_delivery_eligible: null,
   });
   assert.equal(structuredEvidence.fields.sale[0].source, 'json_ld');
+
+  pageText = '$12.00 Item is unavailable for this warehouse Shipping Arrives tomorrow';
+  addButton.disabled = true;
+  context.applyVisibleVendorStatus(structured);
+  assert.equal(structured.vendor_availability, 'in_stock');
+  addButton.disabled = false;
 
   assert.deepEqual(
     { ...context.parseFulfillmentOptions('Shipping Arrives tomorrow Pickup Not available Delivery Not available Add to Cart') },

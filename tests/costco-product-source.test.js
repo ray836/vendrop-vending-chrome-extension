@@ -14,7 +14,7 @@ const jsonLd = {
   '@context': 'https://schema.org',
   '@graph': [{
     '@type': 'Product',
-    name: 'Cheez-It Crackers, Cheddar, 1.5 oz, 45 Count',
+    name: 'Cheez-It Crackers, Cheddar, 1.5 oz, 45-count',
     image: ['https://images.example/cheez-it.jpg'],
     sku: 663439,
     gtin12: '024100171717',
@@ -23,12 +23,26 @@ const jsonLd = {
 };
 
 const document = {
-  body: { textContent: 'Item 663439 Cheez-It 45 count', innerText: 'Item 663439 Cheez-It 45 count' },
+  body: { textContent: 'Item # 663439 Cheez-It', innerText: 'Item # 663439 Cheez-It' },
   scripts: [],
   querySelector() { return null; },
   querySelectorAll(selector) {
     if (selector === 'script[type="application/ld+json"]') {
       return [{ textContent: JSON.stringify(jsonLd) }];
+    }
+    if (selector === 'img[alt]') {
+      return [
+        {
+          alt: 'Enlarge Product Preview 1',
+          src: 'https://gdx-assets.costco.com/adobe/assets/case.avif?width=727&height=727',
+          dataset: {},
+        },
+        {
+          alt: 'Enlarge Product Preview 2',
+          src: 'https://gdx-assets.costco.com/adobe/assets/unit.avif?width=727&height=727',
+          dataset: {},
+        },
+      ];
     }
     return [];
   },
@@ -63,6 +77,11 @@ assert.equal(result.case_size, '45');
 assert.equal(result.unit_size_value, 1.5);
 assert.equal(result.unit_size_unit, 'oz');
 assert.equal(result.case_cost, '18.49');
+assert.deepEqual(Array.from(result.images), [
+  'https://images.example/cheez-it.jpg',
+  'https://gdx-assets.costco.com/adobe/assets/case.avif',
+  'https://gdx-assets.costco.com/adobe/assets/unit.avif',
+]);
 assert.equal(
   context.selectionIdFromUrl('https://www.costco.com/p/-/cheez-it-crackers-cheddar-15-oz-45-count/100381489'),
   'costco:100381489'

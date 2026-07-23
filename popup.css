@@ -364,6 +364,32 @@ header h1 {
   border-left: 4px solid #dc3545;
 }
 
+.catalog-product-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 11px 13px;
+  border: 1px solid #657df2;
+  border-radius: 7px;
+  color: #536bea;
+  background: #f7f8ff;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.catalog-product-link:hover,
+.catalog-product-link:focus-visible {
+  color: #3f55d1;
+  background: #eef0ff;
+}
+
+.catalog-product-link.hidden {
+  display: none;
+}
+
 .analysis-indicator {
   width: fit-content;
   padding: 5px 9px;
