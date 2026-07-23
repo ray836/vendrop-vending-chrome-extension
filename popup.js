@@ -1670,13 +1670,14 @@ function formatTokens(tokens) {
 }
 
 function providerLabel(provider) {
-  return ({ gemini: 'Gemini', openai: 'OpenAI', anthropic: 'Anthropic', xai: 'xAI' })[provider] || provider;
+  return ({ gemini: 'Gemini', kimi: 'Kimi', openai: 'OpenAI', anthropic: 'Anthropic', xai: 'xAI' })[provider] || provider;
 }
 
 function modelLabel(model) {
   return ({
     'gemini-3.1-pro-preview': 'Gemini 3.1 Pro',
     'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite',
+    'kimi-k2.6': 'Kimi K2.6',
   })[model] || model;
 }
 
@@ -1697,12 +1698,15 @@ function renderAiUsageSummary(p) {
           const totalTokens = (provider.inputTokens || 0) +
             (provider.outputTokens || 0) +
             (provider.reasoningTokens || 0);
+          const cachedLabel = provider.cachedInputTokens
+            ? ` · ${formatTokens(provider.cachedInputTokens)} cached input`
+            : '';
           return `<div class="ai-provider-row">
             <div class="ai-provider-head">
               <strong>${escapeHtml(providerLabel(provider.provider))}</strong>
               <span>${provider.calls} call${provider.calls === 1 ? '' : 's'} · ${aiMoney(provider.estimatedCostUsd || 0)}</span>
             </div>
-            <div class="ai-provider-meta">${formatTokens(totalTokens)} tokens · ${formatDuration(provider.durationMs || 0)} model time</div>
+            <div class="ai-provider-meta">${formatTokens(totalTokens)} tokens${cachedLabel} · ${formatDuration(provider.durationMs || 0)} model time</div>
           </div>`;
         }).join('')}
       </div>`
@@ -1723,6 +1727,7 @@ function renderAiUsageSummary(p) {
 
 function analysisFeatureLabel(feature) {
   return ({
+    catalog_combined_analysis: 'Combined catalog analysis',
     catalog_image_classification: 'Image classification',
     catalog_variety_analysis: 'Variety analysis',
     catalog_health_classification: 'Health classification',
