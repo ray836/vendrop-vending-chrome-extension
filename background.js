@@ -843,7 +843,9 @@ function catalogRefreshRetailers(items) {
     const sources = Array.isArray(item.sources) ? item.sources : [];
     if (sources.length) {
       for (const source of sources) {
-        if (isSupportedUrl(source.vendorLink)) retailers.add(source.retailer);
+        if (!source.supersededByRetailerProductId && isSupportedUrl(source.vendorLink)) {
+          retailers.add(source.retailer);
+        }
       }
     } else {
       const retailer = retailerFromSupportedUrl(item.vendorLink);
@@ -859,7 +861,9 @@ function catalogRefreshTargets(items, retailer = null) {
     if (sources.length) {
       return sources
         .filter((source) =>
-          isSupportedUrl(source.vendorLink) && (!retailer || source.retailer === retailer)
+          !source.supersededByRetailerProductId &&
+          isSupportedUrl(source.vendorLink) &&
+          (!retailer || source.retailer === retailer)
         )
         .map((source) => ({
           ...item,
@@ -1324,6 +1328,7 @@ async function refreshProduct(settings, item, scraped, vendorContext = null, ref
       vendorSku: scraped.vendor_sku || null,
       retailer: scraped.retailer || null,
       retailerProductId: scraped.retailer_product_id || scraped.vendor_sku || null,
+      replacesRetailerProductId: scraped.replaces_retailer_product_id || null,
       retailerItemNumber: scraped.retailer_item_number || scraped.item_number || null,
       caseGtin: scraped.case_gtin || scraped.barcode || null,
       unitGtin: scraped.unit_gtin || null,
@@ -1819,6 +1824,7 @@ async function postProduct(settings, scraped, url) {
       vendorSku: scraped.vendor_sku,
       retailer: scraped.retailer || null,
       retailerProductId: scraped.retailer_product_id || scraped.vendor_sku,
+      replacesRetailerProductId: scraped.replaces_retailer_product_id || null,
       retailerItemNumber: scraped.retailer_item_number || scraped.item_number || null,
       caseGtin: scraped.case_gtin || scraped.barcode || null,
       unitGtin: scraped.unit_gtin || null,
